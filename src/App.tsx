@@ -1,121 +1,178 @@
-import type { BookMarks, BookMark } from './types';
-import { useState, useEffect, useMemo, useRef } from 'react';
+import type { BookMark, BookMarks } from './types';
+import {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+    type FormEvent,
+    type KeyboardEvent,
+} from 'react';
+import Fuse from 'fuse.js';
 import Header from './components/Header';
 import BookmarkList from './components/BookmarkList';
 import EditorModal from './components/EditorModal';
-import Fuse from 'fuse.js';
-import icon from '../icon.png'; // Ensure you have a logo image in your assets
+import {
+    getFaviconUrl,
+    loadBookmarks,
+    normalizeUrl,
+    parseBookmarks,
+    saveBookmarks,
+} from './lib';
+import icon from '../icon.png';
+
+function openUrl(url: string, newTab = false) {
+    const destination = normalizeUrl(url);
+    if (!destination) return;
+
+    if (newTab) {
+        window.open(destination, '_blank', 'noopener,noreferrer');
+    } else {
+        window.location.assign(destination);
+    }
+}
 
 function App() {
-    // State management
-    const [bookmarks, setBookmarks] = useState<BookMarks>(
-        localStorage.getItem('bookmarks')
-            ? JSON.parse(localStorage.getItem('bookmarks')!)
-            : {
-                'default': [
-                    {
-                        title: 'Example Bookmark',
-                        url: 'https://example.com',
-                        description: 'This is an example bookmark.',
-                    }
-                ]
-            }
-    );
-
+    const [bookmarks, setBookmarks] = useState<BookMarks>(() => loadBookmarks());
     const [isEditorOpen, setIsEditorOpen] = useState(false);
     const [editorContent, setEditorContent] = useState('');
+    const [editorError, setEditorError] = useState('');
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedIndex, setSelectedIndex] = useState(-1);
     const searchInputRef = useRef<HTMLInputElement>(null);
 
-    // Effects
     useEffect(() => {
-        localStorage.setItem('bookmarks', JSON.stringify(bookmarks));
+        saveBookmarks(bookmarks);
     }, [bookmarks]);
 
     useEffect(() => {
-        if (searchInputRef.current && !isEditorOpen) {
-            searchInputRef.current.focus();
-        }
+        if (!isEditorOpen) searchInputRef.current?.focus();
     }, [isEditorOpen]);
 
     useEffect(() => {
-        setSelectedIndex(-1);
-    }, [searchQuery]);
+        const focusSearch = (event: globalThis.KeyboardEvent) => {
+            if (
+                event.key !== '/' ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.altKey ||
+                isEditorOpen
+            ) {
+                return;
+            }
 
-    // Fuzzy search implementation
+            const target = event.target as HTMLElement | null;
+            if (
+                target?.isContentEditable ||
+                ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '')
+            ) {
+                return;
+            }
+
+            event.preventDefault();
+            searchInputRef.current?.focus();
+        };
+
+        document.addEventListener('keydown', focusSearch);
+        return () => document.removeEventListener('keydown', focusSearch);
+    }, [isEditorOpen]);
+
     const searchResults = useMemo(() => {
         if (!searchQuery.trim()) return [];
 
         const allBookmarks: (BookMark & { category: string })[] = [];
         Object.entries(bookmarks).forEach(([category, bookmarkList]) => {
-            bookmarkList.forEach(bookmark => {
+            bookmarkList.forEach((bookmark) => {
                 allBookmarks.push({ ...bookmark, category });
             });
         });
 
-        const fuse = new Fuse(allBookmarks, {
+        return new Fuse(allBookmarks, {
             keys: ['title', 'description', 'url'],
-            includeScore: true,
             threshold: 0.4,
-        });
-
-        return fuse.search(searchQuery).map(result => result.item);
+        })
+            .search(searchQuery)
+            .map((result) => result.item);
     }, [searchQuery, bookmarks]);
 
-    // Event handlers
-    const handleSearchSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
+    const searchDestination = () => {
+        const selectedBookmark = searchResults[selectedIndex];
+        return selectedBookmark?.url ||
+            `https://www.google.com/search?q=${encodeURIComponent(searchQuery.trim())}`;
+    };
 
-        if (searchResults.length > 0 && selectedIndex >= 0 && selectedIndex < searchResults.length) {
-            const selectedBookmark = searchResults[selectedIndex];
-            window.open(selectedBookmark.url, '_self');
-        } else if (searchQuery.trim()) {
-            const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
-            window.open(googleUrl, '_self');
+    const handleSearchSubmit = (event: FormEvent) => {
+        event.preventDefault();
+        if (searchQuery.trim()) openUrl(searchDestination());
+    };
+
+    const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+        if (event.key === 'ArrowDown' && searchResults.length) {
+            event.preventDefault();
+            setSelectedIndex((current) => (current + 1) % searchResults.length);
+        } else if (event.key === 'ArrowUp' && searchResults.length) {
+            event.preventDefault();
+            setSelectedIndex((current) =>
+                current <= 0 ? searchResults.length - 1 : current - 1,
+            );
+        } else if (event.key === 'Escape') {
+            setSearchQuery('');
+            setSelectedIndex(-1);
+        } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            if (searchQuery.trim()) openUrl(searchDestination(), true);
         }
     };
 
-    const handleSearchKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key === 'Tab') {
-            if (searchResults.length > 0) {
-                e.preventDefault();
-
-                if (e.shiftKey) {
-                    setSelectedIndex(prev => prev <= 0 ? -1 : prev - 1);
-                } else {
-                    setSelectedIndex(prev => prev === -1 ? 0 : (prev + 1) % searchResults.length);
-                }
-            }
-        } else if (e.key === 'Enter') {
-            if (e.ctrlKey || e.metaKey) {
-                e.preventDefault();
-
-                if (searchResults.length > 0 && selectedIndex >= 0 && selectedIndex < searchResults.length) {
-                    const selectedBookmark = searchResults[selectedIndex];
-                    window.open(selectedBookmark.url, '_blank');
-                } else if (searchQuery.trim()) {
-                    const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
-                    window.open(googleUrl, '_blank');
-                }
-            }
-        }
+    const handleSearchChange = (value: string) => {
+        setSearchQuery(value);
+        setSelectedIndex(-1);
     };
 
     const handleEditorOpen = () => {
         setEditorContent(JSON.stringify(bookmarks, null, 2));
+        setEditorError('');
         setIsEditorOpen(true);
+    };
+
+    const handleEditorCancel = useCallback(() => {
+        setIsEditorOpen(false);
+        setEditorError('');
+    }, []);
+
+    const handleEditorContentChange = (value: string) => {
+        setEditorContent(value);
+        setEditorError('');
     };
 
     const handleEditorSave = () => {
         try {
-            const newBookmarks = JSON.parse(editorContent);
-            setBookmarks(newBookmarks);
+            const nextBookmarks = parseBookmarks(editorContent);
+            if (!saveBookmarks(nextBookmarks)) {
+                setEditorError('Bookmarks could not be saved. Export a backup and try again.');
+                return;
+            }
+
+            setBookmarks(nextBookmarks);
             setIsEditorOpen(false);
+            setEditorError('');
         } catch (error) {
-            alert('Error parsing JSON. Please check the format.');
-            console.error("Failed to parse bookmarks JSON:", error);
+            setEditorError(
+                error instanceof Error ? error.message : 'Bookmarks are invalid.',
+            );
         }
+    };
+
+    const handleExport = () => {
+        const data = new Blob([JSON.stringify(bookmarks, null, 2)], {
+            type: 'application/json',
+        });
+        const downloadUrl = URL.createObjectURL(data);
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = 'bookmarks.json';
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
     };
 
     return (
@@ -125,49 +182,74 @@ function App() {
             <EditorModal
                 isOpen={isEditorOpen}
                 content={editorContent}
+                error={editorError}
                 onSave={handleEditorSave}
-                onCancel={() => setIsEditorOpen(false)}
-                onContentChange={setEditorContent}
+                onCancel={handleEditorCancel}
+                onExport={handleExport}
+                onContentChange={handleEditorContentChange}
             />
 
-            {/* Search Bar */}
             <div className="max-w-2xl mx-auto flex justify-center mb-8">
-                <img src={icon} />
+                <img src={icon} alt="" />
             </div>
             <div className="max-w-2xl mx-auto mb-8">
                 <form onSubmit={handleSearchSubmit} className="relative">
                     <input
                         ref={searchInputRef}
-                        type="text"
+                        type="search"
                         value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
+                        onChange={(event) => handleSearchChange(event.target.value)}
                         onKeyDown={handleSearchKeyDown}
                         placeholder="Search bookmarks or enter query for Google..."
+                        aria-label="Search bookmarks or Google"
+                        aria-controls="search-results"
+                        aria-expanded={searchResults.length > 0}
+                        aria-activedescendant={
+                            selectedIndex >= 0 ? `search-result-${selectedIndex}` : undefined
+                        }
+                        role="combobox"
+                        autoComplete="off"
                         className="w-full px-4 py-3 text-lg border border-neutral-800 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                     />
 
                     {searchQuery && searchResults.length > 0 && (
-                        <div className="absolute top-full left-0 right-0 bg-white border border-gray-300 rounded-lg mt-1 max-h-64 overflow-y-auto z-10 shadow-lg">
+                        <div
+                            id="search-results"
+                            role="listbox"
+                            className="absolute top-full left-0 right-0 bg-white border border-gray-300 rounded-lg mt-1 max-h-64 overflow-y-auto z-10 shadow-lg"
+                        >
                             {searchResults.map((bookmark, index) => (
-                                <div
-                                    key={`${bookmark.category}-${index}`}
-                                    className={`px-4 py-2 flex items-center hover:bg-gray-100 cursor-pointer ${index === selectedIndex ? 'bg-blue-100' : ''
-                                        }`}
-                                    onClick={() => window.open(bookmark.url, '_self')}
+                                <button
+                                    id={`search-result-${index}`}
+                                    key={`${bookmark.category}-${bookmark.url}-${bookmark.title}`}
+                                    type="button"
+                                    role="option"
+                                    aria-selected={index === selectedIndex}
+                                    className={`w-full px-4 py-2 flex items-center text-left hover:bg-gray-100 cursor-pointer ${
+                                        index === selectedIndex ? 'bg-blue-100' : ''
+                                    }`}
+                                    onMouseMove={() => setSelectedIndex(index)}
+                                    onClick={() => openUrl(bookmark.url)}
                                 >
                                     <img
-                                        src={bookmark.customIconUrl || `https://www.google.com/s2/favicons?domain=${new URL(bookmark.url).hostname}`}
+                                        src={bookmark.customIconUrl || getFaviconUrl(bookmark.url)}
                                         alt=""
                                         className="w-4 h-4 mr-3 rounded-sm"
                                     />
-                                    <div className="flex-1">
-                                        <div className="text-sm font-medium text-gray-900">
+                                    <span className="flex-1">
+                                        <span className="block text-sm font-medium text-gray-900">
                                             {bookmark.title}
-                                            <span className="text-xs text-gray-500 capitalize"> - {bookmark.category}</span>
-                                        </div>
-                                        <div className="text-xs text-gray-500">{bookmark.description}</div>
-                                    </div>
-                                </div>
+                                            <span className="text-xs text-gray-500 capitalize">
+                                                {' '}· {bookmark.category}
+                                            </span>
+                                        </span>
+                                        {bookmark.description && (
+                                            <span className="block text-xs text-gray-500">
+                                                {bookmark.description}
+                                            </span>
+                                        )}
+                                    </span>
+                                </button>
                             ))}
                         </div>
                     )}
@@ -179,4 +261,4 @@ function App() {
     );
 }
 
-export default App
+export default App;

@@ -1,12 +1,11 @@
-import React from 'react';
 import type { BookMarks } from '../types';
-import { getFaviconUrl } from '../lib';
+import { getFaviconUrl, normalizeUrl } from '../lib';
 
 interface BookmarkListProps {
     bookmarks: BookMarks;
 }
 
-const BookmarkList: React.FC<BookmarkListProps> = ({ bookmarks }) => {
+const BookmarkList = ({ bookmarks }: BookmarkListProps) => {
     return (
         <div className="max-w-6xl mx-auto">
             {Object.keys(bookmarks).map((category) => (
@@ -20,11 +19,12 @@ const BookmarkList: React.FC<BookmarkListProps> = ({ bookmarks }) => {
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {bookmarks[category].map((bookmark, index) => {
                             const faviconUrl = getFaviconUrl(bookmark.url);
+                            const href = normalizeUrl(bookmark.url);
 
                             return (
                                 <a
-                                    key={index}
-                                    href={bookmark.url}
+                                    key={`${bookmark.url}-${bookmark.title}-${index}`}
+                                    href={href}
                                     rel="noopener noreferrer"
                                     className="bg-white relative cursor-pointer rounded-lg shadow-md p-4 hover:shadow-xl hover:-translate-y-1 transition-all duration-300 ease-in-out transform group"
                                 >

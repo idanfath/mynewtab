@@ -1,9 +1,8 @@
-
 export type BookMark = {
     title: string;
     url: string;
     description?: string;
-    customIconUrl?: string; // Optional custom icon URL
+    customIconUrl?: string;
 };
 
 export interface BookMarks {

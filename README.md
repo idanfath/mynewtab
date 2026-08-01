@@ -15,7 +15,7 @@ Note: The favicon support can't fetch favicons for subdomains, but there's an op
 
 ### Prerequisites
 
-- Node.js (v18 or higher recommended)
+- Node.js (v22 or higher recommended)
 - pnpm (or npm/yarn)
 
 ### Installation
