@@ -1,0 +1,1165 @@
+body.app-route {
+    margin: 0;
+    padding: 0;
+    background-color: oklch(0.15 0.008 75);
+    background-image:
+        linear-gradient(90deg, oklch(0.15 0.008 75 / 0) 0%, rgba(0, 0, 0, 0.58) 100%),
+        url("./assets/bg.webp");
+    background-position: center, center;
+    background-size: cover, cover;
+    background-attachment: fixed, fixed;
+    background-repeat: no-repeat, no-repeat;
+    overflow-x: hidden;
+}
+
+html.app-route-root {
+    scrollbar-width: none;
+}
+
+html.app-route-root::-webkit-scrollbar {
+    display: none;
+}
+
+.app-page {
+    --canvas: oklch(0.15 0.008 75);
+    --panel: oklch(0.18 0.009 75);
+    --panel-raised: oklch(0.205 0.011 75);
+    --line: oklch(0.29 0.012 75);
+    --line-strong: oklch(0.39 0.015 75);
+    --directory-line: oklch(0.68 0.022 78 / 0.36);
+    --ink: oklch(0.94 0.009 78);
+    --muted: oklch(0.66 0.018 75);
+    --quiet: oklch(0.5 0.015 75);
+    --accent: oklch(0.79 0.11 76);
+    --danger: oklch(0.7 0.13 30);
+    --ease-native: cubic-bezier(0.32, 0.72, 0, 1);
+    --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-state: cubic-bezier(0.25, 1, 0.5, 1);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.app-shell {
+    position: relative;
+    isolation: isolate;
+    display: grid;
+    grid-template-columns: 13.5rem minmax(28rem, 1fr) 19rem;
+    min-height: 100vh;
+    background: transparent;
+}
+
+.app-sidebar,
+.app-inspector {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    z-index: 2;
+    background: color-mix(in oklch, var(--panel) 92%, transparent);
+}
+
+.app-sidebar {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--line);
+    padding: 1.25rem 0.85rem 1rem;
+    box-shadow: 12px 0 30px oklch(0.08 0.01 75 / 0.16);
+    animation: app-sidebar-left-in 420ms var(--ease-native) both;
+}
+
+.app-brand {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0 0.45rem 2rem;
+    color: var(--ink);
+    text-decoration: none;
+    transition: transform 180ms var(--ease-state);
+}
+
+.app-brand img {
+    width: 2rem;
+    height: 2rem;
+    object-fit: contain;
+    transition: transform 220ms var(--ease-native);
+}
+
+.app-brand:hover {
+    transform: translateX(2px);
+}
+
+.app-brand:hover img {
+    transform: rotate(-5deg);
+}
+
+.app-brand span {
+    display: flex;
+    flex-direction: column;
+    gap: 0.12rem;
+}
+
+.app-brand strong {
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 1.1rem;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+}
+
+.app-brand small {
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.53rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+}
+
+.app-nav-label {
+    margin: 0 0.6rem 0.65rem;
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.56rem;
+    font-weight: 650;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+}
+
+.app-section-nav {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 0.15rem;
+    overflow-y: auto;
+    padding-right: 0.15rem;
+    scrollbar-width: none;
+}
+
+.app-section-nav::-webkit-scrollbar {
+    display: none;
+}
+
+.app-section-nav button {
+    color: var(--muted);
+    background: transparent;
+    border: 0;
+    font: inherit;
+}
+
+.app-section-nav button {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 2.3rem;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid transparent;
+    border-radius: 0.45rem;
+    cursor: pointer;
+    font-size: 0.86rem;
+    text-align: left;
+    transition:
+        color 160ms var(--ease-state),
+        background-color 160ms var(--ease-state),
+        border-color 160ms var(--ease-state),
+        transform 180ms var(--ease-native);
+    animation: app-nav-item-in 420ms var(--ease-enter) backwards;
+}
+
+.app-section-nav button[draggable="true"] {
+    cursor: grab;
+}
+
+.app-section-nav button[draggable="true"]:active {
+    cursor: grabbing;
+}
+
+.app-section-nav button.is-dragging {
+    opacity: 0.38;
+}
+
+.app-section-nav button.is-drop-before::before,
+.app-section-nav button.is-drop-after::after {
+    position: absolute;
+    right: 0.55rem;
+    left: 0.55rem;
+    height: 1px;
+    content: "";
+    background: var(--accent);
+    pointer-events: none;
+}
+
+.app-section-nav button.is-drop-before::before {
+    top: -0.13rem;
+}
+
+.app-section-nav button.is-drop-after::after {
+    bottom: -0.13rem;
+}
+
+.app-section-nav button:first-child {
+    animation-delay: 0ms;
+}
+
+.app-section-nav button:hover {
+    color: var(--ink);
+    background: var(--panel-raised);
+    transform: translateX(2px);
+}
+
+.app-section-nav button.is-active {
+    color: var(--ink);
+    border-color: color-mix(in oklch, var(--line-strong) 72%, transparent);
+    background: color-mix(in oklch, var(--panel-raised) 84%, var(--accent) 4%);
+    box-shadow: 0 8px 20px oklch(0.08 0.01 75 / 0.12);
+    transform: translateX(2px);
+}
+
+.app-section-nav small {
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.63rem;
+    min-width: 1.55rem;
+    padding: 0.12rem 0.3rem;
+    border-radius: 999px;
+    background: oklch(0.13 0.008 75 / 0.52);
+    text-align: center;
+    transition: color 160ms var(--ease-state), background-color 160ms var(--ease-state);
+}
+
+.app-section-nav button.is-active small {
+    color: var(--accent);
+    background: oklch(0.12 0.012 75 / 0.72);
+}
+
+.app-data-actions {
+    display: flex;
+    gap: 0.8rem;
+    margin: 0.8rem 0.45rem 0;
+    padding-top: 0.8rem;
+    border-top: 1px solid var(--line);
+}
+
+.app-data-actions button {
+    padding: 0 0 0.2rem;
+    border: 0;
+    border-bottom: 1px solid transparent;
+    color: var(--quiet);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.61rem;
+    transition: color 150ms var(--ease-state), border-color 150ms var(--ease-state);
+}
+
+.app-data-actions button:hover {
+    border-color: var(--muted);
+    color: var(--muted);
+}
+
+.app-section-nav button:active,
+.app-load-button:active {
+    transform: scale(0.98);
+    transition-duration: 80ms;
+}
+
+.app-main {
+    position: relative;
+    z-index: 1;
+    min-width: 0;
+    padding: 0 2.25rem 5rem;
+    animation: app-main-in 440ms 45ms var(--ease-enter) backwards;
+}
+
+.app-header {
+    position: relative;
+    z-index: 10;
+    display: grid;
+    grid-template-columns: minmax(10rem, 1fr) minmax(14rem, 22rem);
+    align-items: end;
+    gap: 2rem;
+    padding: 2.75rem 0 1.35rem;
+    background: transparent;
+    border-bottom: 1px solid var(--directory-line);
+}
+
+.app-kicker {
+    margin: 0 0 0.4rem;
+    color: var(--accent);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+}
+
+.app-header h1,
+.app-empty h1 {
+    margin: 0;
+    color: var(--ink);
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 2.15rem;
+    font-weight: 400;
+    letter-spacing: -0.045em;
+    line-height: 1;
+}
+
+.app-search-wrap {
+    position: relative;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    min-width: 0;
+    min-height: 2.35rem;
+}
+
+.app-search-trigger {
+    position: absolute;
+    right: 0;
+    z-index: 2;
+    display: grid;
+    width: 1.4rem;
+    height: 2rem;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.78rem;
+    transition:
+        right 520ms cubic-bezier(0.16, 1, 0.3, 1),
+        color 160ms var(--ease-state),
+        opacity 160ms ease;
+    animation: app-search-trigger-in 260ms var(--ease-enter) backwards;
+}
+
+.app-search-trigger:hover {
+    color: var(--ink);
+}
+
+.app-search-wrap.is-open .app-search-trigger {
+    right: calc(100% - 1.4rem);
+    color: var(--accent);
+}
+
+.app-search {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    width: 100%;
+    min-height: 2.35rem;
+    padding: 0 0 0.3rem 1.75rem;
+    border: 0;
+    border-bottom: 1px solid var(--directory-line);
+    background: transparent;
+    opacity: 0;
+    clip-path: inset(0 0 0 100%);
+    pointer-events: none;
+    transition:
+        clip-path 520ms cubic-bezier(0.16, 1, 0.3, 1),
+        opacity 180ms ease,
+        border-color 180ms var(--ease-state);
+}
+
+.app-search-wrap.is-open .app-search {
+    opacity: 1;
+    clip-path: inset(0);
+    pointer-events: auto;
+}
+
+.app-search:focus-within {
+    border-color: var(--accent);
+}
+
+.app-search input {
+    width: 100%;
+    min-width: 0;
+    padding: 0 0.55rem 0 0;
+    border: 0;
+    outline: 0;
+    color: var(--ink);
+    background: transparent;
+    font: inherit;
+    font-size: 0.8rem;
+}
+
+.app-search input::placeholder {
+    color: var(--quiet);
+}
+
+.app-search small {
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.65rem;
+}
+
+.app-directory {
+    padding-top: 2.25rem;
+    animation: app-directory-in 240ms var(--ease-enter) both;
+}
+
+.app-group + .app-group {
+    margin-top: 3.5rem;
+}
+
+.app-group-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 0.65rem;
+}
+
+.app-group-heading h2 {
+    margin: 0;
+    color: var(--muted);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
+.app-group-heading span {
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.65rem;
+}
+
+.app-bookmark-list {
+    border-bottom: 1px solid var(--directory-line);
+}
+
+.app-bookmark {
+    position: relative;
+    display: grid;
+    grid-template-columns: 2.4rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.8rem;
+    min-height: 4rem;
+    padding: 0.55rem 0.65rem;
+    border-top: 1px solid var(--directory-line);
+    color: var(--ink);
+    text-decoration: none;
+    transform-origin: center;
+    transition:
+        color 150ms var(--ease-state),
+        background-color 150ms var(--ease-state),
+        box-shadow 180ms var(--ease-state);
+}
+
+.app-bookmark:hover,
+.app-bookmark:focus-visible,
+.app-bookmark.is-current {
+    outline: none;
+}
+
+.app-bookmark:hover,
+.app-bookmark:focus-visible {
+    background: oklch(0.2 0.01 75 / 0.45);
+}
+
+.app-bookmark.is-current {
+    background: oklch(0.22 0.012 75 / 0.62);
+    -webkit-backdrop-filter: blur(14px) saturate(112%);
+    backdrop-filter: blur(14px) saturate(112%);
+    box-shadow:
+        inset 0 0 0 1px oklch(0.52 0.035 76 / 0.34),
+        0 10px 26px oklch(0.06 0.008 75 / 0.18);
+}
+
+.app-bookmark:hover {
+    box-shadow: none;
+}
+
+.app-bookmark.is-keyboard-current {
+    transition-duration: 0ms;
+}
+
+.app-bookmark.is-keyboard-current img,
+.app-bookmark.is-keyboard-current .app-bookmark-tail b {
+    transition-duration: 0ms;
+}
+
+.app-bookmark img {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.35rem;
+    object-fit: contain;
+    background: oklch(0.93 0.008 75);
+    box-shadow: 0 4px 12px oklch(0.08 0.01 75 / 0.2);
+    transition: box-shadow 180ms var(--ease-state);
+}
+
+.app-bookmark:hover img,
+.app-bookmark.is-current img {
+    box-shadow: 0 7px 18px oklch(0.08 0.01 75 / 0.28);
+}
+
+.app-bookmark-copy {
+    min-width: 0;
+}
+
+.app-bookmark-copy strong,
+.app-bookmark-copy small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-bookmark-copy strong {
+    font-size: 0.92rem;
+    font-weight: 560;
+    letter-spacing: -0.01em;
+}
+
+.app-bookmark-copy small {
+    margin-top: 0.15rem;
+    color: oklch(0.72 0.014 78);
+    font-size: 0.73rem;
+    font-weight: 430;
+}
+
+.app-bookmark-tail {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.app-tier {
+    padding: 0.15rem 0.4rem;
+    border: 1px solid var(--line);
+    border-radius: 0.25rem;
+    color: var(--muted);
+    background: var(--panel-raised);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.58rem;
+    font-style: normal;
+    font-weight: 750;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.app-tier[data-tier="S"] {
+    border-color: oklch(0.78 0.13 75);
+    color: oklch(0.18 0.02 75);
+    background: oklch(0.82 0.14 82);
+}
+
+.app-tier[data-tier="A"] {
+    border-color: oklch(0.62 0.12 155);
+    color: oklch(0.88 0.09 155);
+    background: oklch(0.28 0.055 155);
+}
+
+.app-tier[data-tier="B"] {
+    border-color: oklch(0.6 0.1 45);
+    color: oklch(0.86 0.075 55);
+    background: oklch(0.27 0.045 45);
+}
+
+.app-bookmark-tail b {
+    color: var(--quiet);
+    font-size: 0.8rem;
+    font-weight: 400;
+    opacity: 0.7;
+    transform: translateY(-1px);
+}
+
+.app-bookmark.is-current .app-bookmark-tail b {
+    color: oklch(0.42 0.012 75);
+    opacity: 0.85;
+}
+
+.app-inspector {
+    border-left: 1px solid var(--line);
+    padding: 2.8rem 1.5rem;
+    box-shadow: -12px 0 30px oklch(0.08 0.01 75 / 0.14);
+    animation: app-sidebar-right-in 440ms 70ms var(--ease-native) backwards;
+}
+
+.app-inspector-inner {
+    position: sticky;
+    top: 2.8rem;
+}
+
+.app-inspector-inner.is-instant > *,
+.app-inspector-inner.is-instant .app-meta-row {
+    animation: none;
+}
+
+.app-inspector-inner > .app-kicker {
+    animation: app-inspector-item-in 380ms 20ms var(--ease-enter) backwards;
+}
+
+.app-inspector-icon {
+    width: 3.25rem;
+    height: 3.25rem;
+    margin: 2.5rem 0 1.1rem;
+    border-radius: 0.55rem;
+    object-fit: contain;
+    background: oklch(0.93 0.008 75);
+    box-shadow:
+        0 0 0 1px oklch(0.52 0.04 76 / 0.4),
+        0 12px 30px oklch(0.08 0.01 75 / 0.3);
+    animation: app-inspector-item-in 420ms 65ms var(--ease-enter) backwards;
+}
+
+.app-inspector h2 {
+    margin: 0;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 1.65rem;
+    font-weight: 400;
+    letter-spacing: -0.035em;
+    line-height: 1.1;
+    animation: app-inspector-item-in 420ms 110ms var(--ease-enter) backwards;
+}
+
+.app-inspector-url {
+    overflow: hidden;
+    margin: 0.45rem 0 0;
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.65rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    animation: app-inspector-item-in 400ms 175ms var(--ease-enter) backwards;
+}
+
+.app-inspector-location {
+    margin: 0.8rem 0 0;
+    color: var(--accent);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.58rem;
+    font-weight: 650;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    animation: app-inspector-item-in 400ms 145ms var(--ease-enter) backwards;
+}
+
+.app-inspector-description {
+    margin: 1.25rem 0 0;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.55;
+    animation: app-inspector-item-in 400ms 205ms var(--ease-enter) backwards;
+}
+
+.app-inspector dl {
+    margin: 2rem 0;
+    border-top: 1px solid var(--line);
+}
+
+.app-meta-row {
+    display: grid;
+    grid-template-columns: 4.25rem minmax(0, 1fr);
+    gap: 0.7rem;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 0.72rem;
+    line-height: 1.4;
+    animation: app-inspector-item-in 380ms 225ms var(--ease-enter) backwards;
+}
+
+.app-meta-row:nth-child(2) {
+    animation-delay: 255ms;
+}
+
+.app-meta-row:nth-child(3) {
+    animation-delay: 285ms;
+}
+
+.app-meta-row:nth-child(4) {
+    animation-delay: 315ms;
+}
+
+.app-meta-row:nth-child(5) {
+    animation-delay: 345ms;
+}
+
+.app-meta-row:nth-child(6) {
+    animation-delay: 375ms;
+}
+
+.app-meta-row:nth-child(7) {
+    animation-delay: 405ms;
+}
+
+.app-meta-row dt {
+    color: var(--quiet);
+}
+
+.app-meta-row dd {
+    margin: 0;
+    color: var(--muted);
+}
+
+.app-open-link {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--accent);
+    color: var(--ink);
+    text-decoration: none;
+    font-size: 0.78rem;
+    transition:
+        color 150ms var(--ease-state),
+        border-color 150ms var(--ease-state),
+        transform 180ms var(--ease-native);
+    animation: app-inspector-item-in 420ms 450ms var(--ease-enter) backwards;
+}
+
+.app-open-link span {
+    color: var(--accent);
+    transition: transform 180ms var(--ease-native);
+}
+
+.app-open-link:hover {
+    color: var(--accent);
+    transform: translateY(-1px);
+}
+
+.app-open-link:hover span {
+    transform: translate(2px, -2px);
+}
+
+.app-no-results {
+    padding: 8rem 0;
+    text-align: center;
+    animation: app-directory-in 220ms var(--ease-enter) both;
+}
+
+.app-no-results span {
+    color: var(--accent);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.7rem;
+}
+
+.app-no-results h2 {
+    margin: 0.8rem 0 1.25rem;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 1.7rem;
+    font-weight: 400;
+}
+
+.app-no-results button {
+    padding: 0;
+    border: 0;
+    border-bottom: 1px solid var(--muted);
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.75rem;
+}
+
+.app-inline-error,
+.app-file-error {
+    color: var(--danger);
+    font-size: 0.78rem;
+}
+
+.app-editor-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: grid;
+    padding: clamp(1rem, 4vw, 3rem);
+    place-items: center;
+    background: oklch(0.05 0.006 75 / 0.72);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    animation: app-editor-backdrop-in 180ms ease-out backwards;
+}
+
+.app-editor {
+    display: flex;
+    width: min(68rem, 100%);
+    height: min(46rem, calc(100vh - clamp(2rem, 8vw, 6rem)));
+    max-height: 100%;
+    flex-direction: column;
+    box-sizing: border-box;
+    overflow: hidden;
+    border: 1px solid var(--line-strong);
+    background: oklch(0.13 0.008 75 / 0.97);
+    animation: app-editor-in 360ms var(--ease-enter) backwards;
+}
+
+.app-editor-backdrop.is-closing {
+    animation: app-editor-backdrop-out 180ms ease-in forwards;
+}
+
+.app-editor.is-closing {
+    animation: app-editor-out 180ms var(--ease-native) forwards;
+}
+
+.app-editor > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 2rem;
+    padding: 1.15rem 1.35rem;
+    border-bottom: 1px solid var(--line);
+}
+
+.app-editor h2 {
+    margin: 0.25rem 0 0;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 1.5rem;
+    font-weight: 400;
+}
+
+.app-editor-actions {
+    display: flex;
+    gap: 1rem;
+}
+
+.app-editor-actions button {
+    padding: 0.25rem 0 0.3rem;
+    border: 0;
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.72rem;
+}
+
+.app-editor-actions button:hover,
+.app-editor-actions button.is-primary {
+    border-color: var(--accent);
+    color: var(--ink);
+}
+
+.app-editor-error {
+    margin: 0;
+    padding: 0.7rem 1.35rem;
+    border-bottom: 1px solid color-mix(in oklch, var(--danger) 45%, transparent);
+    color: var(--danger);
+    font-size: 0.75rem;
+}
+
+.app-editor-surface {
+    flex: 1;
+    background: oklch(0.095 0.006 75);
+    min-height: 0;
+}
+
+.app-empty {
+    display: grid;
+    width: 100%;
+    min-height: 100vh;
+    padding: clamp(1.5rem, 5vw, 5rem);
+    place-items: center;
+}
+
+.app-empty-panel {
+    position: relative;
+    top: -2.5rem;
+    width: min(32rem, 100%);
+    margin-left: clamp(0rem, 18vw, 18rem);
+}
+
+.app-empty-brand {
+    display: flex;
+    align-items: center;
+    margin-bottom: 0.8rem;
+    animation: app-empty-item-in 480ms 40ms var(--ease-enter) backwards;
+}
+
+.app-empty-mark {
+    width: 2.75rem;
+    height: 2.75rem;
+    object-fit: contain;
+}
+
+.app-empty h1 {
+    font-size: 3.25rem;
+    animation: app-empty-item-in 500ms 110ms var(--ease-enter) backwards;
+}
+
+.app-empty-copy {
+    max-width: 31rem;
+    margin: 1.15rem 0 1.1rem;
+    color: var(--muted);
+    font-size: 0.95rem;
+    line-height: 1.65;
+    animation: app-empty-item-in 520ms 180ms var(--ease-enter) backwards;
+}
+
+.app-empty-copy code {
+    color: var(--ink);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.83em;
+}
+
+.app-load-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+    min-height: 0;
+    padding: 0.25rem 0 0.35rem;
+    border: 0;
+    border-bottom: 1px solid oklch(0.94 0.009 78 / 0.72);
+    border-radius: 0;
+    color: var(--ink);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 650;
+    text-shadow: none;
+    transition: color 150ms var(--ease-state), background-color 150ms var(--ease-state), transform 180ms var(--ease-native);
+}
+
+.app-load-button span {
+    display: inline-block;
+    width: auto;
+    height: auto;
+    color: inherit;
+    background: transparent;
+    transform: translateY(-1px);
+}
+
+.app-load-button:hover {
+    border-color: var(--ink);
+    color: oklch(0.99 0.004 78);
+    background: transparent;
+    transform: translateY(-1px);
+}
+
+.app-empty-action {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    animation: app-empty-item-in 540ms 250ms var(--ease-enter) backwards;
+}
+
+.app-empty-panel > .app-file-error {
+    animation: app-empty-item-in 420ms 310ms var(--ease-enter) backwards;
+}
+
+@keyframes app-sidebar-left-in {
+    from {
+        opacity: 0;
+        transform: translate3d(-14px, 0, 0);
+    }
+}
+
+@keyframes app-sidebar-right-in {
+    from {
+        opacity: 0;
+        transform: translate3d(14px, 0, 0);
+    }
+}
+
+@keyframes app-main-in {
+    from {
+        opacity: 0;
+    }
+}
+
+@keyframes app-directory-in {
+    from {
+        opacity: 0;
+    }
+}
+
+@keyframes app-inspector-item-in {
+    from {
+        opacity: 0;
+        filter: blur(2px);
+        transform: translate3d(0, 8px, 0);
+    }
+}
+
+@keyframes app-empty-item-in {
+    from {
+        opacity: 0;
+        transform: translate3d(0, 10px, 0);
+    }
+}
+
+@keyframes app-nav-item-in {
+    from {
+        opacity: 0;
+        transform: translate3d(0, -5px, 0);
+    }
+}
+
+@keyframes app-editor-backdrop-in {
+    from {
+        opacity: 0;
+    }
+}
+
+@keyframes app-editor-in {
+    from {
+        opacity: 0;
+        transform: translate3d(0, 10px, 0);
+    }
+}
+
+@keyframes app-editor-backdrop-out {
+    to {
+        opacity: 0;
+    }
+}
+
+@keyframes app-editor-out {
+    to {
+        opacity: 0;
+        transform: translate3d(0, 8px, 0);
+    }
+}
+
+@keyframes app-search-trigger-in {
+    from {
+        opacity: 0;
+        transform: translate3d(0, -4px, 0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .app-page,
+    .app-page *,
+    .app-page *::before,
+    .app-page *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.01ms !important;
+        animation-delay: 0ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+@media (min-width: 1500px) {
+    .app-bookmark-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        border-bottom: 0;
+    }
+
+    .app-bookmark {
+        border-bottom: 1px solid var(--directory-line);
+    }
+
+    .app-bookmark:nth-child(even) {
+        border-left: 1px solid var(--directory-line);
+    }
+
+    .app-bookmark-list:has(> .app-bookmark:last-child:nth-child(odd))
+        > .app-bookmark:nth-last-child(2) {
+        border-bottom: 0;
+    }
+}
+
+@media (min-width: 1900px) {
+    .app-bookmark-list {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .app-bookmark:nth-child(even) {
+        border-left: 0;
+    }
+
+    .app-bookmark:nth-child(3n + 2),
+    .app-bookmark:nth-child(3n) {
+        border-left: 1px solid var(--directory-line);
+    }
+
+    .app-bookmark-list:has(> .app-bookmark:last-child:nth-child(odd))
+        > .app-bookmark:nth-last-child(2) {
+        border-bottom: 1px solid var(--directory-line);
+    }
+
+    .app-bookmark-list:has(> .app-bookmark:last-child:nth-child(3n + 1))
+        > .app-bookmark:nth-last-child(2),
+    .app-bookmark-list:has(> .app-bookmark:last-child:nth-child(3n + 1))
+        > .app-bookmark:nth-last-child(3),
+    .app-bookmark-list:has(> .app-bookmark:last-child:nth-child(3n + 2))
+        > .app-bookmark:nth-last-child(3) {
+        border-bottom: 0;
+    }
+}
+
+@media (max-width: 1050px) {
+    .app-shell {
+        grid-template-columns: 12rem minmax(0, 1fr);
+    }
+
+    .app-inspector {
+        display: none;
+    }
+}
+
+@media (max-width: 720px) {
+    .app-shell {
+        display: block;
+    }
+
+    .app-sidebar {
+        position: sticky;
+        z-index: 20;
+        display: block;
+        width: 100%;
+        height: auto;
+        padding: 0.8rem 1rem;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+    }
+
+    .app-brand {
+        margin: 0 0 0.7rem;
+    }
+
+    .app-section-nav {
+        flex-direction: row;
+        overflow-x: auto;
+        padding: 0 0 0.15rem;
+    }
+
+    .app-section-nav button {
+        flex: 0 0 auto;
+        width: auto;
+        gap: 0.65rem;
+    }
+
+    .app-main {
+        padding: 0 1rem 4rem;
+    }
+
+    .app-header {
+        position: static;
+        display: block;
+        padding-top: 2rem;
+    }
+
+    .app-search-wrap {
+        margin-top: 1.25rem;
+    }
+
+    .app-directory {
+        padding-top: 1.5rem;
+    }
+
+    .app-bookmark-tail .app-tier {
+        display: none;
+    }
+
+    .app-empty h1 {
+        font-size: 2.5rem;
+    }
+
+    .app-empty-panel {
+        margin-left: 0;
+    }
+
+    .app-empty-action {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.75rem;
+    }
+}

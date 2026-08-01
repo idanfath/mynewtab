@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { normalizeUrl } from '../src/lib.ts';
 import {
-    INVALID_BOOKMARKS_BACKUP_KEY,
-    getDefaultBookmarks,
-    loadBookmarks,
-    normalizeUrl,
     parseBookmarks,
-} from '../src/lib.ts';
+    reorderBookmarkSections,
+    searchBookmarks,
+} from '../src/bookmarks.ts';
 
 test('normalizes shorthand domains and rejects unsafe schemes', () => {
     assert.equal(normalizeUrl('example.com/path'), 'https://example.com/path');
@@ -17,29 +16,54 @@ test('normalizes shorthand domains and rejects unsafe schemes', () => {
 
 test('accepts bookmark data only when its shape and URLs are valid', () => {
     assert.deepEqual(
-        parseBookmarks('{"work":[{"title":"Docs","url":"docs.example.com"}]}'),
-        { work: [{ title: 'Docs', url: 'docs.example.com' }] },
+        parseBookmarks('[{"title":"Docs","url":"docs.example.com","section":"Work"}]'),
+        [{ title: 'Docs', url: 'docs.example.com', section: 'Work' }],
     );
     assert.throws(
-        () => parseBookmarks('{"work":[{"title":"Docs","url":"ftp://example.com"}]}'),
+        () => parseBookmarks('[{"title":"Docs","url":"ftp://example.com","section":"Work"}]'),
         /valid HTTP\(S\) URL/,
     );
-    assert.throws(() => parseBookmarks('null'), /grouped by category/);
+    assert.throws(() => parseBookmarks('null'), /JSON array/);
 });
 
-test('backs up invalid stored data before restoring defaults', () => {
-    const values = new Map([['bookmarks', '{broken']]);
-    const storage = {
-        getItem: (key: string) => values.get(key) ?? null,
-        setItem: (key: string, value: string) => values.set(key, value),
-    };
-    const originalWarn = console.warn;
-    console.warn = () => undefined;
+test('reorders whole sections while preserving bookmark order within them', () => {
+    const bookmarks = parseBookmarks(`[
+        {"title":"Work 1","url":"work.example","section":"Work"},
+        {"title":"Media 1","url":"media.example","section":"Media"},
+        {"title":"Media 2","url":"media-2.example","section":"Media"},
+        {"title":"AI 1","url":"ai.example","section":"AI"}
+    ]`);
 
-    try {
-        assert.deepEqual(loadBookmarks(storage), getDefaultBookmarks());
-        assert.equal(values.get(INVALID_BOOKMARKS_BACKUP_KEY), '{broken');
-    } finally {
-        console.warn = originalWarn;
-    }
+    assert.deepEqual(
+        reorderBookmarkSections(bookmarks, 'AI', 'Work', 'before')
+            .map((bookmark) => bookmark.title),
+        ['AI 1', 'Work 1', 'Media 1', 'Media 2'],
+    );
+});
+
+test('matches every search token across different bookmark fields', () => {
+    const bookmarks = parseBookmarks(`[
+        {
+            "title":"Anime Vault",
+            "url":"anime.example",
+            "section":"Media",
+            "categories":["Anime"],
+            "capabilities":["Download","Stream"]
+        },
+        {
+            "title":"Anime News",
+            "url":"news.example",
+            "section":"Reading",
+            "categories":["Anime"]
+        }
+    ]`);
+
+    assert.deepEqual(
+        searchBookmarks(bookmarks, 'anime download').map((bookmark) => bookmark.title),
+        ['Anime Vault'],
+    );
+    assert.deepEqual(
+        searchBookmarks(bookmarks, 'download stream').map((bookmark) => bookmark.title),
+        ['Anime Vault'],
+    );
 });
