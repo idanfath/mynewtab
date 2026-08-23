@@ -754,10 +754,53 @@ html.app-route-root::-webkit-scrollbar {
     font-size: 0.75rem;
 }
 
-.app-inline-error,
-.app-file-error {
-    color: var(--danger);
-    font-size: 0.78rem;
+.app-error-notice {
+    --error-accent: oklch(0.68 0.09 18);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.75rem;
+    padding: 0.8rem 0.9rem;
+    border: 1px solid color-mix(in oklch, var(--error-accent) 32%, transparent);
+    border-left: 2px solid var(--error-accent);
+    border-radius: 0.4rem;
+    color: color-mix(in oklch, var(--error-accent) 56%, var(--ink));
+    background: oklch(0.18 0.012 18 / 0.7);
+    -webkit-backdrop-filter: blur(14px) saturate(108%);
+    backdrop-filter: blur(14px) saturate(108%);
+    font-size: 0.72rem;
+    line-height: 1.45;
+}
+
+.app-error-notice strong {
+    display: block;
+    color: var(--ink);
+    font-size: 0.74rem;
+    font-weight: 650;
+}
+
+.app-error-notice p {
+    margin: 0.2rem 0 0;
+}
+
+.app-error-notice button {
+    align-self: start;
+    padding: 0;
+    border: 0;
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 1rem;
+    line-height: 1;
+}
+
+.app-error-notice button:hover,
+.app-error-notice button:focus-visible {
+    color: var(--ink);
+}
+
+.app-sidebar-error {
+    margin: 0.8rem 0.45rem 0;
 }
 
 .app-editor-backdrop {
@@ -835,9 +878,9 @@ html.app-route-root::-webkit-scrollbar {
 .app-editor-error {
     margin: 0;
     padding: 0.7rem 1.35rem;
-    border-bottom: 1px solid color-mix(in oklch, var(--danger) 45%, transparent);
-    color: var(--danger);
-    font-size: 0.75rem;
+    border-width: 0 0 1px;
+    border-radius: 0;
+    border-bottom-color: color-mix(in oklch, var(--error-accent) 32%, transparent);
 }
 
 .app-editor-surface {
@@ -910,17 +953,36 @@ html.app-route-root::-webkit-scrollbar {
     font: inherit;
     font-size: 0.8rem;
     font-weight: 650;
+    text-align: left;
     text-shadow: none;
     transition: color 150ms var(--ease-state), background-color 150ms var(--ease-state), transform 180ms var(--ease-native);
 }
 
-.app-load-button span {
+.app-load-button > .app-load-arrow {
     display: inline-block;
-    width: auto;
-    height: auto;
-    color: inherit;
-    background: transparent;
+    margin-left: 0.55rem;
     transform: translateY(-1px);
+}
+
+.app-typewriter {
+    display: inline-grid;
+    min-width: 0;
+}
+
+.app-typewriter-reserve,
+.app-typewriter-value {
+    grid-area: 1 / 1;
+    min-width: 0;
+    justify-self: start;
+}
+
+.app-typewriter-reserve {
+    visibility: hidden;
+}
+
+.app-empty-copy .app-typewriter {
+    display: grid;
+    width: 100%;
 }
 
 .app-load-button:hover {
@@ -934,10 +996,19 @@ html.app-route-root::-webkit-scrollbar {
     display: flex;
     align-items: center;
     gap: 1rem;
+    transition-property: opacity;
+    transition-timing-function: var(--ease-state);
     animation: app-empty-item-in 540ms 250ms var(--ease-enter) backwards;
 }
 
+.app-empty-action.is-transparent {
+    opacity: 0;
+    pointer-events: none;
+}
+
 .app-empty-panel > .app-file-error {
+    width: min(100%, 32rem);
+    margin-top: 1.35rem;
     animation: app-empty-item-in 420ms 310ms var(--ease-enter) backwards;
 }
 

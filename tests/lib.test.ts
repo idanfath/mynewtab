@@ -15,6 +15,7 @@ test('normalizes shorthand domains and rejects unsafe schemes', () => {
 });
 
 test('accepts bookmark data only when its shape and URLs are valid', () => {
+    assert.deepEqual(parseBookmarks('  \n  '), []);
     assert.deepEqual(
         parseBookmarks('[{"title":"Docs","url":"docs.example.com","section":"Work"}]'),
         [{ title: 'Docs', url: 'docs.example.com', section: 'Work' }],

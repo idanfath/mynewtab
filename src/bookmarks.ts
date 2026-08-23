@@ -49,6 +49,8 @@ const searchKeys = [
 ];
 
 export function parseBookmarks(content: string): Bookmark[] {
+    if (!content.trim()) return [];
+
     const value: unknown = JSON.parse(content);
     if (!Array.isArray(value)) throw new Error('Expected a JSON array of bookmarks.');
 

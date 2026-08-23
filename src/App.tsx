@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type DragEvent,
 } from 'react';
 import Editor from '@monaco-editor/react';
 import icon from './assets/icon.png';
@@ -17,6 +18,17 @@ import {
 import './App.css';
 
 const STORAGE_KEY = 'newtab-directory-bookmarks';
+const EMPTY_HEADING = 'Bring your index.';
+const DROP_HEADING = 'Drop your file.';
+const EMPTY_COPY = 'Choose your bookmarks.json. It stays in this browser and is never uploaded.';
+const DROP_COPY = 'Drop your bookmarks.json anywhere. It stays in this browser and is never uploaded.';
+const TYPEWRITER_DURATION = 1300;
+const TYPEWRITER_PAUSE = 55;
+
+interface AppError {
+  title: string;
+  detail: string;
+}
 
 function loadStoredBookmarks(): Bookmark[] {
   try {
@@ -25,6 +37,168 @@ function loadStoredBookmarks(): Bookmark[] {
   } catch {
     return [];
   }
+}
+
+function renderTypedText(text: string, codeToken?: string) {
+  if (!codeToken) return text;
+
+  const tokenStart = text.indexOf(codeToken.slice(0, 4));
+  if (tokenStart < 0) return text;
+
+  const tokenEnd = Math.min(tokenStart + codeToken.length, text.length);
+  return (
+    <>
+      {text.slice(0, tokenStart)}
+      <code>{text.slice(tokenStart, tokenEnd)}</code>
+      {text.slice(tokenEnd)}
+    </>
+  );
+}
+
+function TypewriterText({
+  text,
+  reserve,
+  codeToken,
+}: {
+  text: string;
+  reserve: string;
+  codeToken?: string;
+}) {
+  const [displayed, setDisplayed] = useState(text);
+  const displayedRef = useRef(text);
+
+  useEffect(() => {
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      displayedRef.current = text;
+      setDisplayed(text);
+      return;
+    }
+
+    let timeoutId: number;
+    const current = displayedRef.current;
+    if (current === text) return;
+
+    const stepCount = text.startsWith(current)
+      ? text.length - current.length
+      : current.length + text.length;
+    const stepDelay = (TYPEWRITER_DURATION - TYPEWRITER_PAUSE)
+      / Math.max(1, stepCount);
+    const step = () => {
+      const currentText = displayedRef.current;
+      if (currentText === text) return;
+
+      const typing = text.startsWith(currentText);
+      const next = typing
+        ? text.slice(0, currentText.length + 1)
+        : currentText.slice(0, -1);
+      displayedRef.current = next;
+      setDisplayed(next);
+
+      if (next !== text) {
+        timeoutId = window.setTimeout(step, stepDelay);
+      }
+    };
+
+    timeoutId = window.setTimeout(step, TYPEWRITER_PAUSE + stepDelay);
+    return () => window.clearTimeout(timeoutId);
+  }, [text]);
+
+  return (
+    <span className="app-typewriter" aria-label={text}>
+      <span className="app-typewriter-reserve" aria-hidden="true">
+        {renderTypedText(reserve, codeToken)}
+      </span>
+      <span className="app-typewriter-value" aria-hidden="true">
+        {renderTypedText(displayed, codeToken)}
+      </span>
+    </span>
+  );
+}
+
+function ErrorNotice({
+  error,
+  onDismiss,
+  className = '',
+}: {
+  error: AppError;
+  onDismiss: () => void;
+  className?: string;
+}) {
+  return (
+    <div className={`app-error-notice ${className}`.trim()} role="alert">
+      <div>
+        <strong>{error.title}</strong>
+        <p>{error.detail}</p>
+      </div>
+      <button type="button" aria-label="Dismiss error" onClick={onDismiss}>
+        ×
+      </button>
+    </div>
+  );
+}
+
+function jsonErrorLocation(error: SyntaxError, content: string): string {
+  const position = error.message.match(/position\s+(\d+)/i)?.[1];
+  if (!position) return '';
+
+  const offset = Number(position);
+  const lines = content.slice(0, offset).split('\n');
+  return ` near line ${lines.length}, column ${lines.at(-1)!.length + 1}`;
+}
+
+function formatBookmarkError(
+  error: unknown,
+  content: string,
+  title: string,
+): AppError {
+  if (error instanceof SyntaxError) {
+    return {
+      title,
+      detail: `File contains invalid JSON${jsonErrorLocation(error, content)}. Check its syntax and try again.`,
+    };
+  }
+
+  const message = error instanceof Error ? error.message : '';
+  if (message === 'Expected a JSON array of bookmarks.') {
+    return {
+      title,
+      detail: 'Top level must be an array of bookmark objects.',
+    };
+  }
+
+  const fieldError = message.match(/^Bookmark (\d+)\.([\w]+) must be (.+)\.$/);
+  if (fieldError) {
+    const [, index, field, requirement] = fieldError;
+    const friendlyRequirement = requirement === 'a valid HTTP(S) URL'
+      ? 'a valid http:// or https:// address'
+      : requirement === 'a string array'
+        ? 'an array containing only text values'
+        : requirement;
+    return {
+      title,
+      detail: `Bookmark ${index}: “${field}” must be ${friendlyRequirement}.`,
+    };
+  }
+
+  const bookmarkError = message.match(/^Bookmark (\d+) must be an object\.$/);
+  if (bookmarkError) {
+    return {
+      title,
+      detail: `Bookmark ${bookmarkError[1]} must be a bookmark object.`,
+    };
+  }
+
+  return {
+    title,
+    detail: 'Bookmark data could not be validated. Check the file and try again.',
+  };
+}
+
+function storageError(title: string): AppError {
+  return {
+    title,
+    detail: 'Browser storage is full, blocked, or unavailable. Existing bookmarks were not changed.',
+  };
 }
 
 function MetaList({ label, values }: { label: string; values?: string[] }) {
@@ -56,10 +230,12 @@ function App() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorClosing, setEditorClosing] = useState(false);
   const [editorContent, setEditorContent] = useState('');
-  const [editorError, setEditorError] = useState('');
-  const [error, setError] = useState('');
+  const [editorError, setEditorError] = useState<AppError | null>(null);
+  const [error, setError] = useState<AppError | null>(null);
+  const [dropActive, setDropActive] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const dropDepthRef = useRef(0);
 
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
@@ -131,7 +307,7 @@ function App() {
     setQuery('');
     setActiveBookmark(nextBookmarks[0] ?? null);
     setKeyboardSelection(false);
-    setError('');
+    setError(null);
   };
 
   const reorderSection = (
@@ -152,28 +328,77 @@ function App() {
       setBookmarks(nextBookmarks);
       setActiveBookmark(null);
       setKeyboardSelection(false);
-      setError('');
-    } catch (storageError) {
-      setError(
-        storageError instanceof Error
-          ? `Could not save section order: ${storageError.message}`
-          : 'Could not save section order.',
-      );
+      setError(null);
+    } catch {
+      setError(storageError('Couldn’t save section order'));
+    }
+  };
+
+  const importFile = async (file: File) => {
+    let content: string;
+    try {
+      content = await file.text();
+    } catch {
+      setError({
+        title: 'Couldn’t read file',
+        detail: 'Choose a readable JSON file and try again.',
+      });
+      return;
+    }
+
+    let nextBookmarks: Bookmark[];
+    try {
+      nextBookmarks = parseBookmarks(content);
+    } catch (parseError) {
+      setError(formatBookmarkError(parseError, content, 'Couldn’t import bookmarks'));
+      return;
+    }
+
+    try {
+      applyBookmarks(nextBookmarks);
+    } catch {
+      setError(storageError('Couldn’t import bookmarks'));
     }
   };
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) return;
+    if (file) await importFile(file);
+    event.target.value = '';
+  };
 
-    try {
-      const nextBookmarks = parseBookmarks(await file.text());
-      applyBookmarks(nextBookmarks);
-    } catch (fileError) {
-      setError(fileError instanceof Error ? fileError.message : 'Could not read file.');
-    } finally {
-      event.target.value = '';
+  const handleDrop = async (event: DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    dropDepthRef.current = 0;
+    setDropActive(false);
+
+    const files = [...event.dataTransfer.files];
+    if (files.length !== 1) {
+      setError({
+        title: 'Couldn’t import bookmarks',
+        detail: 'Drop one JSON file at a time.',
+      });
+      return;
     }
+
+    const [file] = files;
+    if (!file.name.toLocaleLowerCase().endsWith('.json')) {
+      setError({
+        title: 'Couldn’t import bookmarks',
+        detail: 'Drop a file with a .json extension.',
+      });
+      return;
+    }
+
+    setError(null);
+    await importFile(file);
+  };
+
+  const chooseFile = () => {
+    setError(null);
+    dropDepthRef.current = 0;
+    setDropActive(false);
+    fileRef.current?.click();
   };
 
   const exportBookmarks = () => {
@@ -192,7 +417,7 @@ function App() {
 
   const openEditor = () => {
     setEditorContent(JSON.stringify(bookmarks, null, 2));
-    setEditorError('');
+    setEditorError(null);
     setEditorClosing(false);
     setEditorOpen(true);
   };
@@ -207,29 +432,70 @@ function App() {
   };
 
   const saveEditor = () => {
+    let nextBookmarks: Bookmark[];
     try {
-      applyBookmarks(parseBookmarks(editorContent));
-      closeEditor();
-      setEditorError('');
+      nextBookmarks = parseBookmarks(editorContent);
     } catch (saveError) {
       setEditorError(
-        saveError instanceof Error ? saveError.message : 'Bookmarks are invalid.',
+        formatBookmarkError(saveError, editorContent, 'Couldn’t save changes'),
       );
+      return;
+    }
+
+    try {
+      applyBookmarks(nextBookmarks);
+      closeEditor();
+      setEditorError(null);
+    } catch {
+      setEditorError(storageError('Couldn’t save changes'));
     }
   };
 
   if (!bookmarks.length) {
     return (
-      <main className="app-empty app-page">
+      <main
+        className={`app-empty app-page${dropActive ? ' is-drop-active' : ''}`}
+        onDragEnter={(event) => {
+          if (Array.from(event.dataTransfer.types).includes('Files')) {
+            event.preventDefault();
+            dropDepthRef.current += 1;
+            setDropActive(true);
+          }
+        }}
+        onDragOver={(event) => {
+          if (Array.from(event.dataTransfer.types).includes('Files')) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'copy';
+          }
+        }}
+        onDragLeave={(event) => {
+          event.preventDefault();
+          dropDepthRef.current = Math.max(0, dropDepthRef.current - 1);
+          if (dropDepthRef.current === 0) {
+            setDropActive(false);
+          }
+        }}
+        onDrop={handleDrop}
+      >
         <section className="app-empty-panel">
           <div className="app-empty-brand">
             <img src={icon} alt="" className="app-empty-mark" />
           </div>
-          <h1>Bring your index.</h1>
-          <p className="app-empty-copy">
-            Choose your <code>bookmarks.json</code>. It stays in this browser
-            and is never uploaded.
-          </p>
+          <div aria-live="polite">
+            <h1>
+              <TypewriterText
+                text={dropActive ? DROP_HEADING : EMPTY_HEADING}
+                reserve={EMPTY_HEADING}
+              />
+            </h1>
+            <p className="app-empty-copy">
+              <TypewriterText
+                text={dropActive ? DROP_COPY : EMPTY_COPY}
+                reserve={DROP_COPY}
+                codeToken="bookmarks.json"
+              />
+            </p>
+          </div>
           <input
             ref={fileRef}
             type="file"
@@ -237,16 +503,28 @@ function App() {
             hidden
             onChange={handleFile}
           />
-          <div className="app-empty-action">
+          <div
+            className={`app-empty-action${dropActive ? ' is-transparent' : ''}`}
+            aria-hidden={dropActive}
+            style={{ transitionDuration: `${TYPEWRITER_DURATION}ms` }}
+          >
             <button
               type="button"
               className="app-load-button"
-              onClick={() => fileRef.current?.click()}
+              tabIndex={dropActive ? -1 : undefined}
+              onClick={chooseFile}
             >
-              Choose JSON file <span aria-hidden="true">↗</span>
+              Choose JSON file
+              <span className="app-load-arrow" aria-hidden="true">↗</span>
             </button>
           </div>
-          {error && <p className="app-file-error">{error}</p>}
+          {error && (
+            <ErrorNotice
+              error={error}
+              onDismiss={() => setError(null)}
+              className="app-file-error"
+            />
+          )}
         </section>
       </main>
     );
@@ -330,6 +608,14 @@ function App() {
           ))}
         </nav>
 
+        {error && (
+          <ErrorNotice
+            error={error}
+            onDismiss={() => setError(null)}
+            className="app-sidebar-error"
+          />
+        )}
+
         <div className="app-data-actions">
           <input
             ref={fileRef}
@@ -338,7 +624,7 @@ function App() {
             hidden
             onChange={handleFile}
           />
-          <button type="button" onClick={() => fileRef.current?.click()}>
+          <button type="button" onClick={chooseFile}>
             Import
           </button>
           <button type="button" onClick={exportBookmarks}>
@@ -409,8 +695,6 @@ function App() {
             </label>
           </div>
         </header>
-
-        {error && <p className="app-inline-error">{error}</p>}
 
         <div key={section} className="app-directory">
           {[...groupedMatches].map(([sectionName, items]) => (
@@ -564,7 +848,13 @@ function App() {
                 </button>
               </div>
             </header>
-            {editorError && <p className="app-editor-error">{editorError}</p>}
+            {editorError && (
+              <ErrorNotice
+                error={editorError}
+                onDismiss={() => setEditorError(null)}
+                className="app-editor-error"
+              />
+            )}
             <div className="app-editor-surface">
               <Editor
                 height="100%"
@@ -598,7 +888,7 @@ function App() {
                 }}
                 onChange={(value) => {
                   setEditorContent(value ?? '');
-                  setEditorError('');
+                  setEditorError(null);
                 }}
                 options={{
                   automaticLayout: true,
