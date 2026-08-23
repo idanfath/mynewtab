@@ -147,10 +147,19 @@ function App() {
       target,
       position,
     );
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
-    setBookmarks(nextBookmarks);
-    setActiveBookmark(null);
-    setKeyboardSelection(false);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
+      setBookmarks(nextBookmarks);
+      setActiveBookmark(null);
+      setKeyboardSelection(false);
+      setError('');
+    } catch (storageError) {
+      setError(
+        storageError instanceof Error
+          ? `Could not save section order: ${storageError.message}`
+          : 'Could not save section order.',
+      );
+    }
   };
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -369,6 +378,7 @@ function App() {
                 }}
                 onChange={(event) => {
                   setQuery(event.target.value);
+                  setActiveBookmark(null);
                   setKeyboardSelection(true);
                 }}
                 onKeyDown={(event) => {
@@ -393,7 +403,7 @@ function App() {
                   }
                 }}
                 placeholder="Find anything…"
-                aria-label="Search test bookmarks"
+                aria-label="Search bookmarks"
               />
               <small>{matches.length}</small>
             </label>
