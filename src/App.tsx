@@ -20,10 +20,15 @@ import './App.css';
 const STORAGE_KEY = 'newtab-directory-bookmarks';
 const EMPTY_HEADING = 'Bring your index.';
 const DROP_HEADING = 'Drop your file.';
+const URL_DROP_HEADING = 'Drop your URL.';
 const EMPTY_COPY = 'Choose your bookmarks.json. It stays in this browser and is never uploaded.';
 const DROP_COPY = 'Drop your bookmarks.json anywhere. It stays in this browser and is never uploaded.';
+const URL_DROP_COPY = 'Drop your URL anywhere. It will be saved locally in the Uncategorized section.';
+const SECTION_DRAG_TYPE = 'application/x-mynewtab-section';
 const TYPEWRITER_DURATION = 1300;
 const TYPEWRITER_PAUSE = 55;
+
+type DropMode = 'file' | 'url' | null;
 
 interface AppError {
   title: string;
@@ -37,6 +42,52 @@ function loadStoredBookmarks(): Bookmark[] {
   } catch {
     return [];
   }
+}
+
+function detectDropMode(
+  dataTransfer: DataTransfer,
+  allowFiles: boolean,
+): DropMode {
+  const types = Array.from(dataTransfer.types);
+  if (types.includes(SECTION_DRAG_TYPE)) return null;
+  if (allowFiles && types.includes('Files')) return 'file';
+  if (
+    types.includes('text/uri-list')
+    || types.includes('text/html')
+    || types.includes('text/plain')
+  ) {
+    return 'url';
+  }
+  return null;
+}
+
+function readDroppedUrl(dataTransfer: DataTransfer): string {
+  const candidates = [
+    ...dataTransfer.getData('text/uri-list').split('\n'),
+    ...dataTransfer.getData('text/plain').split('\n'),
+  ];
+
+  for (const candidate of candidates) {
+    const value = candidate.trim();
+    if (!value || value.startsWith('#')) continue;
+    const normalized = normalizeUrl(value);
+    if (normalized) return normalized;
+  }
+  return '';
+}
+
+function readDroppedTitle(dataTransfer: DataTransfer, url: string): string {
+  const html = dataTransfer.getData('text/html');
+  if (html) {
+    const document = new DOMParser().parseFromString(html, 'text/html');
+    const matchingLink = [...document.querySelectorAll('a')].find(
+      (link) => normalizeUrl(link.href) === url,
+    );
+    const title = matchingLink?.textContent?.replace(/\s+/g, ' ').trim();
+    if (title) return title.slice(0, 120);
+  }
+
+  return new URL(url).hostname.replace(/^www\./, '');
 }
 
 function renderTypedText(text: string, codeToken?: string) {
@@ -232,7 +283,9 @@ function App() {
   const [editorContent, setEditorContent] = useState('');
   const [editorError, setEditorError] = useState<AppError | null>(null);
   const [error, setError] = useState<AppError | null>(null);
-  const [dropActive, setDropActive] = useState(false);
+  const [dropMode, setDropMode] = useState<DropMode>(null);
+  const [urlDropSection, setUrlDropSection] = useState<string | null>(null);
+  const [addedBookmark, setAddedBookmark] = useState<Bookmark | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const dropDepthRef = useRef(0);
@@ -253,6 +306,12 @@ function App() {
     document.addEventListener('keydown', handleShortcut);
     return () => document.removeEventListener('keydown', handleShortcut);
   }, []);
+
+  useEffect(() => {
+    if (!addedBookmark) return;
+    const timeoutId = window.setTimeout(() => setAddedBookmark(null), 6500);
+    return () => window.clearTimeout(timeoutId);
+  }, [addedBookmark]);
 
   const sectionCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -308,6 +367,7 @@ function App() {
     setActiveBookmark(nextBookmarks[0] ?? null);
     setKeyboardSelection(false);
     setError(null);
+    setAddedBookmark(null);
   };
 
   const reorderSection = (
@@ -367,12 +427,43 @@ function App() {
     event.target.value = '';
   };
 
-  const handleDrop = async (event: DragEvent<HTMLElement>) => {
-    event.preventDefault();
+  const resetDropState = () => {
     dropDepthRef.current = 0;
-    setDropActive(false);
+    setDropMode(null);
+    setUrlDropSection(null);
+  };
 
-    const files = [...event.dataTransfer.files];
+  const handleDragEnter = (
+    event: DragEvent<HTMLElement>,
+    allowFiles: boolean,
+  ) => {
+    const mode = detectDropMode(event.dataTransfer, allowFiles);
+    if (!mode) return;
+    event.preventDefault();
+    dropDepthRef.current += 1;
+    if (mode === 'url') setAddedBookmark(null);
+    setDropMode(mode);
+  };
+
+  const handleDragOver = (
+    event: DragEvent<HTMLElement>,
+    allowFiles: boolean,
+  ) => {
+    if (!detectDropMode(event.dataTransfer, allowFiles)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLElement>) => {
+    if (!dropDepthRef.current) return;
+    event.preventDefault();
+    dropDepthRef.current = Math.max(0, dropDepthRef.current - 1);
+    if (dropDepthRef.current === 0) setDropMode(null);
+  };
+
+  const importDroppedFile = async (dataTransfer: DataTransfer) => {
+    const files = [...dataTransfer.files];
+
     if (files.length !== 1) {
       setError({
         title: 'Couldn’t import bookmarks',
@@ -394,10 +485,88 @@ function App() {
     await importFile(file);
   };
 
+  const addDroppedUrl = (
+    dataTransfer: DataTransfer,
+    targetSection = 'Uncategorized',
+  ) => {
+    const url = readDroppedUrl(dataTransfer);
+    if (!url) {
+      setError({
+        title: 'Couldn’t save URL',
+        detail: 'Drop a valid http:// or https:// webpage link.',
+      });
+      return;
+    }
+
+    const duplicate = bookmarks.find(
+      (bookmark) => normalizeUrl(bookmark.url) === url,
+    );
+    if (duplicate) {
+      setError({
+        title: 'URL already saved',
+        detail: `“${duplicate.title}” already points to this address.`,
+      });
+      return;
+    }
+
+    const bookmark: Bookmark = {
+      title: readDroppedTitle(dataTransfer, url),
+      url,
+      section: targetSection,
+    };
+    const nextBookmarks = [...bookmarks, bookmark];
+
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
+      setBookmarks(nextBookmarks);
+      setSection(targetSection);
+      setQuery('');
+      setActiveBookmark(bookmark);
+      setKeyboardSelection(false);
+      setError(null);
+      setAddedBookmark(bookmark);
+    } catch {
+      setError(storageError('Couldn’t save URL'));
+    }
+  };
+
+  const handlePageDrop = async (
+    event: DragEvent<HTMLElement>,
+    allowFiles: boolean,
+  ) => {
+    const mode = detectDropMode(event.dataTransfer, allowFiles);
+    event.preventDefault();
+    resetDropState();
+
+    if (mode === 'file') {
+      await importDroppedFile(event.dataTransfer);
+    } else if (mode === 'url') {
+      addDroppedUrl(event.dataTransfer);
+    }
+  };
+
+  const undoDroppedUrl = () => {
+    if (!addedBookmark) return;
+    const nextBookmarks = bookmarks.filter(
+      (bookmark) => bookmark !== addedBookmark,
+    );
+
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
+      setBookmarks(nextBookmarks);
+      setSection('All');
+      setActiveBookmark(null);
+      setKeyboardSelection(false);
+      setAddedBookmark(null);
+      setError(null);
+    } catch {
+      setError(storageError('Couldn’t undo URL addition'));
+    }
+  };
+
   const chooseFile = () => {
     setError(null);
-    dropDepthRef.current = 0;
-    setDropActive(false);
+    resetDropState();
     fileRef.current?.click();
   };
 
@@ -452,30 +621,17 @@ function App() {
   };
 
   if (!bookmarks.length) {
+    const dropActive = dropMode !== null;
+    const dropHeading = dropMode === 'url' ? URL_DROP_HEADING : DROP_HEADING;
+    const dropCopy = dropMode === 'url' ? URL_DROP_COPY : DROP_COPY;
+
     return (
       <main
         className={`app-empty app-page${dropActive ? ' is-drop-active' : ''}`}
-        onDragEnter={(event) => {
-          if (Array.from(event.dataTransfer.types).includes('Files')) {
-            event.preventDefault();
-            dropDepthRef.current += 1;
-            setDropActive(true);
-          }
-        }}
-        onDragOver={(event) => {
-          if (Array.from(event.dataTransfer.types).includes('Files')) {
-            event.preventDefault();
-            event.dataTransfer.dropEffect = 'copy';
-          }
-        }}
-        onDragLeave={(event) => {
-          event.preventDefault();
-          dropDepthRef.current = Math.max(0, dropDepthRef.current - 1);
-          if (dropDepthRef.current === 0) {
-            setDropActive(false);
-          }
-        }}
-        onDrop={handleDrop}
+        onDragEnter={(event) => handleDragEnter(event, true)}
+        onDragOver={(event) => handleDragOver(event, true)}
+        onDragLeave={handleDragLeave}
+        onDrop={(event) => { void handlePageDrop(event, true); }}
       >
         <section className="app-empty-panel">
           <div className="app-empty-brand">
@@ -484,13 +640,13 @@ function App() {
           <div aria-live="polite">
             <h1>
               <TypewriterText
-                text={dropActive ? DROP_HEADING : EMPTY_HEADING}
+                text={dropActive ? dropHeading : EMPTY_HEADING}
                 reserve={EMPTY_HEADING}
               />
             </h1>
             <p className="app-empty-copy">
               <TypewriterText
-                text={dropActive ? DROP_COPY : EMPTY_COPY}
+                text={dropActive ? dropCopy : EMPTY_COPY}
                 reserve={DROP_COPY}
                 codeToken="bookmarks.json"
               />
@@ -531,7 +687,13 @@ function App() {
   }
 
   return (
-    <div className="app-shell app-page">
+    <div
+      className="app-shell app-page"
+      onDragEnter={(event) => handleDragEnter(event, false)}
+      onDragOver={(event) => handleDragOver(event, false)}
+      onDragLeave={handleDragLeave}
+      onDrop={(event) => { void handlePageDrop(event, false); }}
+    >
       <aside className="app-sidebar">
         <a href="/" className="app-brand" aria-label="Reload new tab page">
           <img src={icon} alt="" />
@@ -565,37 +727,72 @@ function App() {
                 dragTarget?.name === name
                   ? ` is-drop-${dragTarget.position}`
                   : ''
+              }${
+                urlDropSection === name ? ' is-url-drop-target' : ''
               }`}
               aria-pressed={section === name}
               title="Drag to reorder"
               onDragStart={(event) => {
                 event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData(SECTION_DRAG_TYPE, name);
                 event.dataTransfer.setData('text/plain', name);
                 setDraggedSection(name);
               }}
+              onDragEnter={(event) => {
+                if (detectDropMode(event.dataTransfer, false) === 'url') {
+                  setUrlDropSection(name);
+                }
+              }}
               onDragOver={(event) => {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = 'move';
-                const bounds = event.currentTarget.getBoundingClientRect();
-                setDragTarget({
-                  name,
-                  position: event.clientY < bounds.top + bounds.height / 2
-                    ? 'before'
-                    : 'after',
-                });
+                if (Array.from(event.dataTransfer.types).includes(SECTION_DRAG_TYPE)) {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = 'move';
+                  const bounds = event.currentTarget.getBoundingClientRect();
+                  setDragTarget({
+                    name,
+                    position: event.clientY < bounds.top + bounds.height / 2
+                      ? 'before'
+                      : 'after',
+                  });
+                  return;
+                }
+
+                if (detectDropMode(event.dataTransfer, false) === 'url') {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = 'copy';
+                  setUrlDropSection(name);
+                }
+              }}
+              onDragLeave={(event) => {
+                const nextTarget = event.relatedTarget as Node | null;
+                if (!nextTarget || !event.currentTarget.contains(nextTarget)) {
+                  setUrlDropSection((current) => current === name ? null : current);
+                }
               }}
               onDrop={(event) => {
-                event.preventDefault();
-                const source = event.dataTransfer.getData('text/plain');
-                if (source && dragTarget) {
-                  reorderSection(source, name, dragTarget.position);
+                const source = event.dataTransfer.getData(SECTION_DRAG_TYPE);
+                if (source) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  if (dragTarget) {
+                    reorderSection(source, name, dragTarget.position);
+                  }
+                  setDraggedSection(null);
+                  setDragTarget(null);
+                  return;
                 }
-                setDraggedSection(null);
-                setDragTarget(null);
+
+                if (detectDropMode(event.dataTransfer, false) === 'url') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  resetDropState();
+                  addDroppedUrl(event.dataTransfer, name);
+                }
               }}
               onDragEnd={() => {
                 setDraggedSection(null);
                 setDragTarget(null);
+                setUrlDropSection(null);
               }}
               onClick={() => {
                 setSection(name);
@@ -817,6 +1014,28 @@ function App() {
           </div>
         )}
       </aside>
+
+      {dropMode === 'url' && (
+        <div className="app-url-drop-hint" role="status">
+          <span aria-hidden="true">＋</span>
+          <div>
+            <strong>Drop URL to save</strong>
+            <small>
+              It will land in {urlDropSection ?? 'Uncategorized'}
+            </small>
+          </div>
+        </div>
+      )}
+
+      {addedBookmark && (
+        <div className="app-undo-toast" role="status">
+          <div>
+            <strong>Saved to {addedBookmark.section}</strong>
+            <small>{addedBookmark.title}</small>
+          </div>
+          <button type="button" onClick={undoDroppedUrl}>Undo</button>
+        </div>
+      )}
 
       {editorOpen && (
         <div
