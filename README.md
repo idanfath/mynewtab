@@ -6,6 +6,9 @@ Personal new-tab page built with React, TypeScript, Vite, Tailwind CSS, and Mona
 
 - Flat JSON bookmark data with validation.
 - Import, export, and edit bookmarks in the browser.
+- Add, edit, delete, and restore individual bookmarks without editing JSON.
+- Rename sections or remove them by moving or deleting their bookmarks.
+- Drop browser links into a section, or anywhere to use `Uncategorized`.
 - Local persistence through `localStorage`.
 - Fuzzy search across titles, sections, categories, capabilities, and notes.
 - Drag-and-drop section ordering.

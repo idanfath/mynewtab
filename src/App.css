@@ -269,6 +269,42 @@ html.app-route-root::-webkit-scrollbar {
     color: var(--muted);
 }
 
+.app-section-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 0.65rem;
+    margin: 0.75rem 0.45rem 0;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--line);
+}
+
+.app-section-actions span {
+    overflow: hidden;
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.56rem;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.app-section-actions button {
+    padding: 0 0 0.18rem;
+    border: 0;
+    border-bottom: 1px solid transparent;
+    color: var(--quiet);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.58rem;
+}
+
+.app-section-actions button:hover {
+    border-color: var(--muted);
+    color: var(--muted);
+}
+
 .app-section-nav button:active,
 .app-load-button:active {
     transform: scale(0.98);
@@ -293,6 +329,88 @@ html.app-route-root::-webkit-scrollbar {
     padding: 2.75rem 0 1.35rem;
     background: transparent;
     border-bottom: 1px solid var(--directory-line);
+}
+
+.app-header-tools {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.35rem;
+    min-width: 0;
+}
+
+.app-add-bookmark {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    width: 1.4rem;
+    min-height: 2.35rem;
+    padding: 0;
+    border: 0;
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.7rem;
+    white-space: nowrap;
+    transition: width 420ms cubic-bezier(0.16, 1, 0.3, 1), color 160ms var(--ease-state);
+}
+
+.app-add-bookmark:hover,
+.app-add-bookmark:focus-visible {
+    width: 3.4rem;
+    color: var(--ink);
+}
+
+.app-add-label {
+    position: absolute;
+    right: 1.4rem;
+    opacity: 0;
+    clip-path: inset(0 0 0 100%);
+    transform: translateX(0.35rem);
+    transition:
+        clip-path 420ms cubic-bezier(0.16, 1, 0.3, 1),
+        opacity 150ms ease,
+        transform 420ms var(--ease-enter);
+}
+
+.app-add-symbol {
+    display: grid;
+    width: 1.4rem;
+    height: 1.8rem;
+    color: inherit;
+    place-items: center;
+    transition: color 160ms var(--ease-state), transform 220ms var(--ease-native);
+}
+
+.app-add-bookmark:hover .app-add-label,
+.app-add-bookmark:focus-visible .app-add-label {
+    opacity: 1;
+    clip-path: inset(0);
+    transform: translateX(0);
+}
+
+.app-add-bookmark:hover .app-add-symbol,
+.app-add-bookmark:focus-visible .app-add-symbol {
+    color: var(--accent);
+    transform: scale(1.08);
+}
+
+.app-compact-bookmark-actions {
+    display: none;
+    gap: 0.65rem;
+}
+
+.app-compact-bookmark-actions button {
+    padding: 0.25rem 0 0.3rem;
+    border: 0;
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--quiet);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.65rem;
 }
 
 .app-kicker {
@@ -321,27 +439,43 @@ html.app-route-root::-webkit-scrollbar {
     display: flex;
     justify-content: flex-end;
     align-items: center;
+    width: 1.4rem;
     min-width: 0;
     min-height: 2.35rem;
+    flex: 0 0 1.4rem;
+    transition: width 520ms cubic-bezier(0.16, 1, 0.3, 1), flex-basis 520ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.app-search-wrap:not(.is-open):hover,
+.app-search-wrap:not(.is-open):has(.app-search-trigger:focus-visible) {
+    width: 4.6rem;
+    flex-basis: 4.6rem;
+}
+
+.app-search-wrap.is-open {
+    width: 100%;
+    flex: 1 1 14rem;
 }
 
 .app-search-trigger {
     position: absolute;
     right: 0;
     z-index: 2;
-    display: grid;
-    width: 1.4rem;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    width: 100%;
     height: 2rem;
-    place-items: center;
     padding: 0;
     border: 0;
     color: var(--muted);
     background: transparent;
     cursor: pointer;
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 0.78rem;
+    font-size: 0.7rem;
     transition:
         right 520ms cubic-bezier(0.16, 1, 0.3, 1),
+        width 520ms cubic-bezier(0.16, 1, 0.3, 1),
         color 160ms var(--ease-state),
         opacity 160ms ease;
     animation: app-search-trigger-in 260ms var(--ease-enter) backwards;
@@ -351,9 +485,49 @@ html.app-route-root::-webkit-scrollbar {
     color: var(--ink);
 }
 
+.app-search-hover-label {
+    position: absolute;
+    right: 1.4rem;
+    opacity: 0;
+    clip-path: inset(0 0 0 100%);
+    transform: translateX(0.35rem);
+    transition:
+        clip-path 420ms cubic-bezier(0.16, 1, 0.3, 1),
+        opacity 150ms ease,
+        transform 420ms var(--ease-enter);
+}
+
+.app-search-symbol {
+    display: grid;
+    width: 1.4rem;
+    height: 2rem;
+    flex: 0 0 auto;
+    place-items: center;
+    transition: color 160ms var(--ease-state), transform 220ms var(--ease-native);
+}
+
+.app-search-wrap:not(.is-open):hover .app-search-hover-label,
+.app-search-trigger:focus-visible .app-search-hover-label {
+    opacity: 1;
+    clip-path: inset(0);
+    transform: translateX(0);
+}
+
+.app-search-wrap:not(.is-open):hover .app-search-symbol,
+.app-search-trigger:focus-visible .app-search-symbol {
+    color: var(--accent);
+    transform: scale(1.06);
+}
+
 .app-search-wrap.is-open .app-search-trigger {
     right: calc(100% - 1.4rem);
+    width: 1.4rem;
     color: var(--accent);
+}
+
+.app-search-wrap.is-open .app-search-hover-label {
+    opacity: 0;
+    clip-path: inset(0 0 0 100%);
 }
 
 .app-search {
@@ -708,6 +882,36 @@ html.app-route-root::-webkit-scrollbar {
     color: var(--muted);
 }
 
+.app-inspector-actions {
+    display: flex;
+    gap: 1rem;
+    margin: -0.65rem 0 1.25rem;
+    animation: app-inspector-item-in 400ms 430ms var(--ease-enter) backwards;
+}
+
+.app-inspector-actions button {
+    padding: 0 0 0.2rem;
+    border: 0;
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.68rem;
+}
+
+.app-inspector-actions button:hover,
+.app-inspector-actions button:focus-visible {
+    border-color: var(--accent);
+    color: var(--ink);
+}
+
+.app-inspector-actions button.is-danger:hover,
+.app-inspector-actions button.is-danger:focus-visible {
+    border-color: var(--danger);
+    color: color-mix(in oklch, var(--danger) 58%, var(--ink));
+}
+
 .app-open-link {
     display: flex;
     justify-content: space-between;
@@ -892,6 +1096,226 @@ html.app-route-root::-webkit-scrollbar {
     cursor: pointer;
     font: inherit;
     font-size: 0.7rem;
+}
+
+.app-form-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 120;
+    display: grid;
+    padding: clamp(1rem, 4vw, 3rem);
+    place-items: center;
+    background: oklch(0.05 0.006 75 / 0.72);
+    -webkit-backdrop-filter: blur(9px);
+    backdrop-filter: blur(9px);
+    animation: app-editor-backdrop-in 180ms ease-out backwards;
+}
+
+.app-form-dialog {
+    width: min(46rem, 100%);
+    max-height: calc(100vh - clamp(2rem, 8vw, 6rem));
+    overflow: hidden;
+    border: 1px solid var(--line-strong);
+    border-radius: 0.55rem;
+    background: oklch(0.14 0.009 75 / 0.97);
+    box-shadow: 0 28px 80px oklch(0.04 0.006 75 / 0.46);
+    animation: app-editor-in 320ms var(--ease-enter) backwards;
+}
+
+.app-section-dialog {
+    width: min(32rem, 100%);
+}
+
+.app-form-dialog form {
+    display: flex;
+    max-height: inherit;
+    flex-direction: column;
+}
+
+.app-form-dialog header,
+.app-form-dialog footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    flex: 0 0 auto;
+    padding: 1.15rem 1.35rem;
+}
+
+.app-form-dialog header {
+    border-bottom: 1px solid var(--line);
+}
+
+.app-form-dialog footer {
+    justify-content: flex-end;
+    border-top: 1px solid var(--line);
+}
+
+.app-form-dialog h2 {
+    margin: 0.25rem 0 0;
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 1.45rem;
+    font-weight: 400;
+    letter-spacing: -0.025em;
+}
+
+.app-form-close,
+.app-form-dialog footer button {
+    padding: 0.25rem 0 0.3rem;
+    border: 0;
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.7rem;
+}
+
+.app-form-close:hover,
+.app-form-dialog footer button:hover,
+.app-form-dialog footer button:focus-visible,
+.app-form-dialog footer button.is-primary {
+    border-color: var(--accent);
+    color: var(--ink);
+}
+
+.app-form-dialog footer button.is-danger {
+    border-color: color-mix(in oklch, var(--danger) 65%, transparent);
+    color: color-mix(in oklch, var(--danger) 58%, var(--ink));
+}
+
+.app-form-body {
+    overflow-y: auto;
+    padding: 1.35rem;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+}
+
+.app-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+}
+
+.app-form-grid label,
+.app-form-field {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.45rem;
+}
+
+.app-form-grid label.is-wide {
+    grid-column: 1 / -1;
+}
+
+.app-form-grid label > span,
+.app-form-field > span,
+.app-section-choices legend {
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.58rem;
+    font-weight: 650;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+}
+
+.app-form-grid label > small {
+    color: var(--quiet);
+    font-size: 0.62rem;
+    line-height: 1.4;
+}
+
+.app-form-dialog input,
+.app-form-dialog textarea,
+.app-form-dialog select {
+    width: 100%;
+    min-width: 0;
+    padding: 0.65rem 0.7rem;
+    border: 1px solid var(--line);
+    border-radius: 0.35rem;
+    outline: 0;
+    color: var(--ink);
+    background: oklch(0.11 0.007 75 / 0.72);
+    font: inherit;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    transition: border-color 150ms var(--ease-state), background-color 150ms var(--ease-state);
+}
+
+.app-form-dialog textarea {
+    resize: vertical;
+}
+
+.app-form-dialog input:focus,
+.app-form-dialog textarea:focus,
+.app-form-dialog select:focus {
+    border-color: color-mix(in oklch, var(--accent) 72%, var(--line));
+    background: oklch(0.13 0.009 75 / 0.88);
+}
+
+.app-form-details {
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--line);
+}
+
+.app-form-details summary {
+    margin-bottom: 1rem;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.72rem;
+}
+
+.app-form-hint {
+    margin: 0.85rem 0 0;
+    color: var(--quiet);
+    font-size: 0.65rem;
+}
+
+.app-form-error {
+    margin: 1rem 0 0;
+    padding: 0.7rem 0.8rem;
+    border-left: 2px solid oklch(0.68 0.09 18);
+    color: color-mix(in oklch, oklch(0.68 0.09 18) 56%, var(--ink));
+    background: oklch(0.18 0.012 18 / 0.7);
+    font-size: 0.72rem;
+    line-height: 1.45;
+}
+
+.app-section-choices {
+    display: flex;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.app-section-choices legend {
+    margin-bottom: 0.85rem;
+}
+
+.app-section-choices label {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.8rem;
+    border: 1px solid var(--line);
+    border-radius: 0.4rem;
+    color: var(--muted);
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+
+.app-section-choices input[type="radio"] {
+    width: auto;
+    accent-color: var(--accent);
+}
+
+.app-section-choices select {
+    grid-column: 2;
 }
 
 .app-editor-backdrop {
@@ -1262,6 +1686,10 @@ html.app-route-root::-webkit-scrollbar {
     .app-inspector {
         display: none;
     }
+
+    .app-compact-bookmark-actions {
+        display: flex;
+    }
 }
 
 @media (max-width: 720px) {
@@ -1306,8 +1734,12 @@ html.app-route-root::-webkit-scrollbar {
         padding-top: 2rem;
     }
 
-    .app-search-wrap {
+    .app-header-tools {
         margin-top: 1.25rem;
+    }
+
+    .app-header-tools .app-search-wrap {
+        margin-top: 0;
     }
 
     .app-directory {
@@ -1330,5 +1762,21 @@ html.app-route-root::-webkit-scrollbar {
         align-items: flex-start;
         flex-direction: column;
         gap: 0.75rem;
+    }
+
+    .app-form-backdrop {
+        padding: 0.75rem;
+    }
+
+    .app-form-dialog {
+        max-height: calc(100vh - 1.5rem);
+    }
+
+    .app-form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .app-form-grid label.is-wide {
+        grid-column: auto;
     }
 }

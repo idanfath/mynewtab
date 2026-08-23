@@ -8,6 +8,8 @@ import {
 } from 'react';
 import Editor from '@monaco-editor/react';
 import icon from './assets/icon.png';
+import BookmarkDialog from './BookmarkDialog';
+import SectionDialog from './SectionDialog';
 import { getFaviconUrl, normalizeUrl } from './lib';
 import {
   parseBookmarks,
@@ -33,6 +35,24 @@ type DropMode = 'file' | 'url' | null;
 interface AppError {
   title: string;
   detail: string;
+}
+
+interface UndoState {
+  title: string;
+  detail: string;
+  bookmarks: Bookmark[];
+  section: string;
+  query: string;
+  activeBookmark: Bookmark | null;
+}
+
+type BookmarkDialogState =
+  | { mode: 'add'; initialSection: string }
+  | { mode: 'edit'; bookmark: Bookmark };
+
+interface SectionDialogState {
+  mode: 'rename' | 'delete';
+  section: string;
 }
 
 function loadStoredBookmarks(): Bookmark[] {
@@ -188,6 +208,18 @@ function ErrorNotice({
   );
 }
 
+function UndoNotice({ undo, onUndo }: { undo: UndoState; onUndo: () => void }) {
+  return (
+    <div className="app-undo-toast" role="status">
+      <div>
+        <strong>{undo.title}</strong>
+        <small>{undo.detail}</small>
+      </div>
+      <button type="button" onClick={onUndo}>Undo</button>
+    </div>
+  );
+}
+
 function jsonErrorLocation(error: SyntaxError, content: string): string {
   const position = error.message.match(/position\s+(\d+)/i)?.[1];
   if (!position) return '';
@@ -285,7 +317,9 @@ function App() {
   const [error, setError] = useState<AppError | null>(null);
   const [dropMode, setDropMode] = useState<DropMode>(null);
   const [urlDropSection, setUrlDropSection] = useState<string | null>(null);
-  const [addedBookmark, setAddedBookmark] = useState<Bookmark | null>(null);
+  const [undoState, setUndoState] = useState<UndoState | null>(null);
+  const [bookmarkDialog, setBookmarkDialog] = useState<BookmarkDialogState | null>(null);
+  const [sectionDialog, setSectionDialog] = useState<SectionDialogState | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const dropDepthRef = useRef(0);
@@ -293,25 +327,41 @@ function App() {
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
+      const isTyping = target?.isContentEditable
+        || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '');
+      if (isTyping || editorOpen || bookmarkDialog || sectionDialog) return;
+
       if (
-        event.key === '/' &&
-        !target?.isContentEditable &&
-        !['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '')
+        event.key === '/'
+        && !event.ctrlKey
+        && !event.metaKey
+        && !event.altKey
       ) {
         event.preventDefault();
         setSearchOpen(true);
         window.requestAnimationFrame(() => searchRef.current?.focus());
+      } else if (
+        event.key === '+'
+        && !event.ctrlKey
+        && !event.metaKey
+        && !event.altKey
+      ) {
+        event.preventDefault();
+        setBookmarkDialog({
+          mode: 'add',
+          initialSection: section === 'All' ? 'Uncategorized' : section,
+        });
       }
     };
     document.addEventListener('keydown', handleShortcut);
     return () => document.removeEventListener('keydown', handleShortcut);
-  }, []);
+  }, [bookmarkDialog, editorOpen, section, sectionDialog]);
 
   useEffect(() => {
-    if (!addedBookmark) return;
-    const timeoutId = window.setTimeout(() => setAddedBookmark(null), 6500);
+    if (!undoState) return;
+    const timeoutId = window.setTimeout(() => setUndoState(null), 6500);
     return () => window.clearTimeout(timeoutId);
-  }, [addedBookmark]);
+  }, [undoState]);
 
   const sectionCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -367,7 +417,7 @@ function App() {
     setActiveBookmark(nextBookmarks[0] ?? null);
     setKeyboardSelection(false);
     setError(null);
-    setAddedBookmark(null);
+    setUndoState(null);
   };
 
   const reorderSection = (
@@ -437,11 +487,12 @@ function App() {
     event: DragEvent<HTMLElement>,
     allowFiles: boolean,
   ) => {
+    if (bookmarkDialog || sectionDialog || editorOpen) return;
     const mode = detectDropMode(event.dataTransfer, allowFiles);
     if (!mode) return;
     event.preventDefault();
     dropDepthRef.current += 1;
-    if (mode === 'url') setAddedBookmark(null);
+    if (mode === 'url') setUndoState(null);
     setDropMode(mode);
   };
 
@@ -449,6 +500,7 @@ function App() {
     event: DragEvent<HTMLElement>,
     allowFiles: boolean,
   ) => {
+    if (bookmarkDialog || sectionDialog || editorOpen) return;
     if (!detectDropMode(event.dataTransfer, allowFiles)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
@@ -524,7 +576,14 @@ function App() {
       setActiveBookmark(bookmark);
       setKeyboardSelection(false);
       setError(null);
-      setAddedBookmark(bookmark);
+      setUndoState({
+        title: `Saved to ${targetSection}`,
+        detail: bookmark.title,
+        bookmarks,
+        section,
+        query,
+        activeBookmark,
+      });
     } catch {
       setError(storageError('Couldn’t save URL'));
     }
@@ -534,6 +593,7 @@ function App() {
     event: DragEvent<HTMLElement>,
     allowFiles: boolean,
   ) => {
+    if (bookmarkDialog || sectionDialog || editorOpen) return;
     const mode = detectDropMode(event.dataTransfer, allowFiles);
     event.preventDefault();
     resetDropState();
@@ -545,22 +605,161 @@ function App() {
     }
   };
 
-  const undoDroppedUrl = () => {
-    if (!addedBookmark) return;
-    const nextBookmarks = bookmarks.filter(
-      (bookmark) => bookmark !== addedBookmark,
+  const undoLastChange = () => {
+    if (!undoState) return;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(undoState.bookmarks));
+      setBookmarks(undoState.bookmarks);
+      setSection(undoState.section);
+      setQuery(undoState.query);
+      setActiveBookmark(undoState.activeBookmark);
+      setKeyboardSelection(false);
+      setUndoState(null);
+      setError(null);
+    } catch {
+      setError(storageError('Couldn’t undo last change'));
+    }
+  };
+
+  const saveBookmark = (nextBookmark: Bookmark): string | null => {
+    const editingBookmark = bookmarkDialog?.mode === 'edit'
+      ? bookmarkDialog.bookmark
+      : null;
+    const normalizedUrl = normalizeUrl(nextBookmark.url);
+    const duplicate = bookmarks.find(
+      (bookmark) => bookmark !== editingBookmark
+        && normalizeUrl(bookmark.url) === normalizedUrl,
     );
+    if (duplicate) return `“${duplicate.title}” already uses this URL.`;
+
+    const nextBookmarks = editingBookmark
+      ? bookmarks.map((bookmark) =>
+        bookmark === editingBookmark ? nextBookmark : bookmark)
+      : [...bookmarks, nextBookmark];
 
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
       setBookmarks(nextBookmarks);
-      setSection('All');
+      setSection(nextBookmark.section);
+      setQuery('');
+      setActiveBookmark(nextBookmark);
+      setKeyboardSelection(false);
+      setError(null);
+      setUndoState(null);
+      setBookmarkDialog(null);
+      return null;
+    } catch {
+      return 'Browser storage is full, blocked, or unavailable.';
+    }
+  };
+
+  const deleteBookmark = (bookmarkToDelete: Bookmark) => {
+    const nextBookmarks = bookmarks.filter(
+      (bookmark) => bookmark !== bookmarkToDelete,
+    );
+    const nextSection = section !== 'All'
+      && !nextBookmarks.some((bookmark) => bookmark.section === section)
+      ? 'All'
+      : section;
+
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
+      setBookmarks(nextBookmarks);
+      setSection(nextSection);
       setActiveBookmark(null);
       setKeyboardSelection(false);
-      setAddedBookmark(null);
       setError(null);
+      setBookmarkDialog(null);
+      setUndoState({
+        title: 'Bookmark removed',
+        detail: bookmarkToDelete.title,
+        bookmarks,
+        section,
+        query,
+        activeBookmark,
+      });
     } catch {
-      setError(storageError('Couldn’t undo URL addition'));
+      setError(storageError('Couldn’t remove bookmark'));
+    }
+  };
+
+  const renameSection = (nextName: string): string | null => {
+    if (!sectionDialog) return 'Section is no longer available.';
+    const previousName = sectionDialog.section;
+    if (!nextName) return 'Enter a section name.';
+    if (nextName.toLocaleLowerCase() === 'all') {
+      return '“All” is reserved for the complete directory.';
+    }
+    const conflictingSection = [...sectionCounts.keys()].find(
+      (name) => name !== previousName
+        && name.toLocaleLowerCase() === nextName.toLocaleLowerCase(),
+    );
+    if (conflictingSection) {
+      return `“${conflictingSection}” already exists.`;
+    }
+
+    let nextActiveBookmark = activeBookmark;
+    const nextBookmarks = bookmarks.map((bookmark) => {
+      if (bookmark.section !== previousName) return bookmark;
+      const renamed = { ...bookmark, section: nextName };
+      if (bookmark === activeBookmark) nextActiveBookmark = renamed;
+      return renamed;
+    });
+
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
+      setBookmarks(nextBookmarks);
+      setSection(nextName);
+      setActiveBookmark(nextActiveBookmark);
+      setKeyboardSelection(false);
+      setError(null);
+      setUndoState(null);
+      setSectionDialog(null);
+      return null;
+    } catch {
+      return 'Browser storage is full, blocked, or unavailable.';
+    }
+  };
+
+  const deleteSection = (
+    strategy: 'move' | 'delete',
+    destination?: string,
+  ): string | null => {
+    if (!sectionDialog) return 'Section is no longer available.';
+    const sectionToDelete = sectionDialog.section;
+    if (strategy === 'move' && !destination) {
+      return 'Choose a destination section.';
+    }
+
+    const affectedCount = sectionCounts.get(sectionToDelete) ?? 0;
+    const nextBookmarks = strategy === 'move'
+      ? bookmarks.map((bookmark) =>
+        bookmark.section === sectionToDelete
+          ? { ...bookmark, section: destination! }
+          : bookmark)
+      : bookmarks.filter((bookmark) => bookmark.section !== sectionToDelete);
+
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
+      setBookmarks(nextBookmarks);
+      setSection(strategy === 'move' ? destination! : 'All');
+      setActiveBookmark(null);
+      setKeyboardSelection(false);
+      setError(null);
+      setSectionDialog(null);
+      setUndoState({
+        title: strategy === 'move' ? 'Section removed' : 'Section and bookmarks removed',
+        detail: strategy === 'move'
+          ? `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} moved to ${destination}.`
+          : `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} removed from ${sectionToDelete}.`,
+        bookmarks,
+        section,
+        query,
+        activeBookmark,
+      });
+      return null;
+    } catch {
+      return 'Browser storage is full, blocked, or unavailable.';
     }
   };
 
@@ -673,6 +872,18 @@ function App() {
               Choose JSON file
               <span className="app-load-arrow" aria-hidden="true">↗</span>
             </button>
+            <button
+              type="button"
+              className="app-load-button"
+              tabIndex={dropActive ? -1 : undefined}
+              onClick={() => setBookmarkDialog({
+                mode: 'add',
+                initialSection: 'Uncategorized',
+              })}
+            >
+              Add manually
+              <span className="app-load-arrow" aria-hidden="true">＋</span>
+            </button>
           </div>
           {error && (
             <ErrorNotice
@@ -682,6 +893,15 @@ function App() {
             />
           )}
         </section>
+        {bookmarkDialog?.mode === 'add' && (
+          <BookmarkDialog
+            initialSection={bookmarkDialog.initialSection}
+            sections={[]}
+            onCancel={() => setBookmarkDialog(null)}
+            onSave={saveBookmark}
+          />
+        )}
+        {undoState && <UndoNotice undo={undoState} onUndo={undoLastChange} />}
       </main>
     );
   }
@@ -805,6 +1025,24 @@ function App() {
           ))}
         </nav>
 
+        {section !== 'All' && sectionCounts.has(section) && (
+          <div className="app-section-actions">
+            <span>{section}</span>
+            <button
+              type="button"
+              onClick={() => setSectionDialog({ mode: 'rename', section })}
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              onClick={() => setSectionDialog({ mode: 'delete', section })}
+            >
+              Remove
+            </button>
+          </div>
+        )}
+
         {error && (
           <ErrorNotice
             error={error}
@@ -840,56 +1078,91 @@ function App() {
             <p className="app-kicker">Personal directory</p>
             <h1>{section === 'All' ? 'Everything' : section}</h1>
           </div>
-          <div className={`app-search-wrap${searchOpen ? ' is-open' : ''}`}>
+          <div className="app-header-tools">
+            {inspected && (
+              <div className="app-compact-bookmark-actions">
+                <button
+                  type="button"
+                  onClick={() => setBookmarkDialog({
+                    mode: 'edit',
+                    bookmark: inspected,
+                  })}
+                >
+                  Edit
+                </button>
+                <button type="button" onClick={() => deleteBookmark(inspected)}>
+                  Delete
+                </button>
+              </div>
+            )}
             <button
               type="button"
-              className="app-search-trigger"
-              aria-label={searchOpen ? 'Focus search' : 'Open search'}
-              onClick={() => {
-                setSearchOpen(true);
-                window.requestAnimationFrame(() => searchRef.current?.focus());
-              }}
+              className="app-add-bookmark"
+              aria-label="Add bookmark"
+              title="Add bookmark (+)"
+              onClick={() => setBookmarkDialog({
+                mode: 'add',
+                initialSection: section === 'All' ? 'Uncategorized' : section,
+              })}
             >
-              /
+              <span className="app-add-label" aria-hidden="true">Add</span>
+              <span className="app-add-symbol" aria-hidden="true">+</span>
             </button>
-            <label className="app-search">
-              <input
-                ref={searchRef}
-                value={query}
-                onBlur={() => {
-                  if (!query) setSearchOpen(false);
+            <div className={`app-search-wrap${searchOpen ? ' is-open' : ''}`}>
+              <button
+                type="button"
+                className="app-search-trigger"
+                aria-label={searchOpen ? 'Focus search' : 'Open search'}
+                title="Search (/)"
+                onClick={() => {
+                  setSearchOpen(true);
+                  window.requestAnimationFrame(() => searchRef.current?.focus());
                 }}
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  setActiveBookmark(null);
-                  setKeyboardSelection(true);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'ArrowDown') {
-                    event.preventDefault();
-                    selectRelativeBookmark(1);
-                  } else if (event.key === 'ArrowUp') {
-                    event.preventDefault();
-                    selectRelativeBookmark(-1);
-                  } else if (event.key === 'Enter' && inspected) {
-                    event.preventDefault();
-                    const destination = normalizeUrl(inspected.url);
-                    if (event.ctrlKey || event.metaKey) {
-                      window.open(destination, '_blank', 'noopener,noreferrer');
-                    } else {
-                      window.location.assign(destination);
+              >
+                <span className="app-search-hover-label" aria-hidden="true">
+                  Search
+                </span>
+                <span className="app-search-symbol" aria-hidden="true">/</span>
+              </button>
+              <label className="app-search">
+                <input
+                  ref={searchRef}
+                  value={query}
+                  onBlur={() => {
+                    if (!query) setSearchOpen(false);
+                  }}
+                  onChange={(event) => {
+                    setQuery(event.target.value);
+                    setActiveBookmark(null);
+                    setKeyboardSelection(true);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'ArrowDown') {
+                      event.preventDefault();
+                      selectRelativeBookmark(1);
+                    } else if (event.key === 'ArrowUp') {
+                      event.preventDefault();
+                      selectRelativeBookmark(-1);
+                    } else if (event.key === 'Enter' && inspected) {
+                      event.preventDefault();
+                      const destination = normalizeUrl(inspected.url);
+                      if (event.ctrlKey || event.metaKey) {
+                        window.open(destination, '_blank', 'noopener,noreferrer');
+                      } else {
+                        window.location.assign(destination);
+                      }
+                    } else if (event.key === 'Escape') {
+                      setQuery('');
+                      setSearchOpen(false);
+                      searchRef.current?.blur();
                     }
-                  } else if (event.key === 'Escape') {
-                    setQuery('');
-                    setSearchOpen(false);
-                    searchRef.current?.blur();
-                  }
-                }}
-                placeholder="Find anything…"
-                aria-label="Search bookmarks"
-              />
-              <small>{matches.length}</small>
-            </label>
+                  }}
+                  placeholder="Find anything…"
+                  aria-label="Search bookmarks"
+                />
+                <small>{matches.length}</small>
+              </label>
+            </div>
           </div>
         </header>
 
@@ -1008,6 +1281,24 @@ function App() {
               <MetaList label="Good" values={inspected.pros} />
               <MetaList label="Watch" values={inspected.cons} />
             </dl>
+            <div className="app-inspector-actions">
+              <button
+                type="button"
+                onClick={() => setBookmarkDialog({
+                  mode: 'edit',
+                  bookmark: inspected,
+                })}
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                className="is-danger"
+                onClick={() => deleteBookmark(inspected)}
+              >
+                Delete
+              </button>
+            </div>
             <a href={normalizeUrl(inspected.url)} className="app-open-link">
               Open destination <span>↗</span>
             </a>
@@ -1027,14 +1318,34 @@ function App() {
         </div>
       )}
 
-      {addedBookmark && (
-        <div className="app-undo-toast" role="status">
-          <div>
-            <strong>Saved to {addedBookmark.section}</strong>
-            <small>{addedBookmark.title}</small>
-          </div>
-          <button type="button" onClick={undoDroppedUrl}>Undo</button>
-        </div>
+      {undoState && (
+        <UndoNotice undo={undoState} onUndo={undoLastChange} />
+      )}
+
+      {bookmarkDialog && (
+        <BookmarkDialog
+          bookmark={bookmarkDialog.mode === 'edit' ? bookmarkDialog.bookmark : undefined}
+          initialSection={bookmarkDialog.mode === 'add'
+            ? bookmarkDialog.initialSection
+            : bookmarkDialog.bookmark.section}
+          sections={[...sectionCounts.keys()]}
+          onCancel={() => setBookmarkDialog(null)}
+          onSave={saveBookmark}
+        />
+      )}
+
+      {sectionDialog && (
+        <SectionDialog
+          mode={sectionDialog.mode}
+          section={sectionDialog.section}
+          count={sectionCounts.get(sectionDialog.section) ?? 0}
+          otherSections={[...sectionCounts.keys()].filter(
+            (name) => name !== sectionDialog.section,
+          )}
+          onCancel={() => setSectionDialog(null)}
+          onRename={renameSection}
+          onDelete={deleteSection}
+        />
       )}
 
       {editorOpen && (
