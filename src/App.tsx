@@ -11,7 +11,18 @@ import icon from './assets/icon.png';
 import BookmarkDialog from './BookmarkDialog';
 import SectionDialog from './SectionDialog';
 import { getFaviconUrl, normalizeUrl } from './lib';
-import { useBookmarks, storageError, type AppError, type UndoState } from './useBookmarks';
+import TypewriterText, { TYPEWRITER_DURATION } from './TypewriterText';
+import { useBookmarks, storageError, type AppError } from './useBookmarks';
+import { ErrorNotice, MetaList, UndoNotice } from './notices';
+import { formatBookmarkError } from './formatBookmarkError';
+import { tierRank } from './tierRank';
+import {
+  SECTION_DRAG_TYPE,
+  detectDropMode,
+  readDroppedTitle,
+  readDroppedUrl,
+  type DropMode,
+} from './dropHandlers';
 import {
   parseBookmarks,
   reorderBookmarkSections,
@@ -26,11 +37,6 @@ const URL_DROP_HEADING = 'Drop your URL.';
 const EMPTY_COPY = 'Choose your bookmarks.json. It stays in this browser and is never uploaded.';
 const DROP_COPY = 'Drop your bookmarks.json anywhere. It stays in this browser and is never uploaded.';
 const URL_DROP_COPY = 'Drop your URL anywhere. It will be saved locally in the Uncategorized section.';
-const SECTION_DRAG_TYPE = 'application/x-mynewtab-section';
-const TYPEWRITER_DURATION = 1300;
-const TYPEWRITER_PAUSE = 55;
-
-type DropMode = 'file' | 'url' | null;
 
 type BookmarkDialogState =
   | { mode: 'add'; initialSection: string }
@@ -39,233 +45,6 @@ type BookmarkDialogState =
 interface SectionDialogState {
   mode: 'rename' | 'delete';
   section: string;
-}
-
-function detectDropMode(
-  dataTransfer: DataTransfer,
-  allowFiles: boolean,
-): DropMode {
-  const types = Array.from(dataTransfer.types);
-  if (types.includes(SECTION_DRAG_TYPE)) return null;
-  if (allowFiles && types.includes('Files')) return 'file';
-  if (
-    types.includes('text/uri-list')
-    || types.includes('text/html')
-    || types.includes('text/plain')
-  ) {
-    return 'url';
-  }
-  return null;
-}
-
-function readDroppedUrl(dataTransfer: DataTransfer): string {
-  const candidates = [
-    ...dataTransfer.getData('text/uri-list').split('\n'),
-    ...dataTransfer.getData('text/plain').split('\n'),
-  ];
-
-  for (const candidate of candidates) {
-    const value = candidate.trim();
-    if (!value || value.startsWith('#')) continue;
-    const normalized = normalizeUrl(value);
-    if (normalized) return normalized;
-  }
-  return '';
-}
-
-function readDroppedTitle(dataTransfer: DataTransfer, url: string): string {
-  const html = dataTransfer.getData('text/html');
-  if (html) {
-    const document = new DOMParser().parseFromString(html, 'text/html');
-    const matchingLink = [...document.querySelectorAll('a')].find(
-      (link) => normalizeUrl(link.href) === url,
-    );
-    const title = matchingLink?.textContent?.replace(/\s+/g, ' ').trim();
-    if (title) return title.slice(0, 120);
-  }
-
-  return new URL(url).hostname.replace(/^www\./, '');
-}
-
-function renderTypedText(text: string, codeToken?: string) {
-  if (!codeToken) return text;
-
-  const tokenStart = text.indexOf(codeToken.slice(0, 4));
-  if (tokenStart < 0) return text;
-
-  const tokenEnd = Math.min(tokenStart + codeToken.length, text.length);
-  return (
-    <>
-      {text.slice(0, tokenStart)}
-      <code>{text.slice(tokenStart, tokenEnd)}</code>
-      {text.slice(tokenEnd)}
-    </>
-  );
-}
-
-function TypewriterText({
-  text,
-  reserve,
-  codeToken,
-}: {
-  text: string;
-  reserve: string;
-  codeToken?: string;
-}) {
-  const [displayed, setDisplayed] = useState(text);
-  const displayedRef = useRef(text);
-
-  useEffect(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      displayedRef.current = text;
-      setDisplayed(text);
-      return;
-    }
-
-    let timeoutId: number;
-    const current = displayedRef.current;
-    if (current === text) return;
-
-    const stepCount = text.startsWith(current)
-      ? text.length - current.length
-      : current.length + text.length;
-    const stepDelay = (TYPEWRITER_DURATION - TYPEWRITER_PAUSE)
-      / Math.max(1, stepCount);
-    const step = () => {
-      const currentText = displayedRef.current;
-      if (currentText === text) return;
-
-      const typing = text.startsWith(currentText);
-      const next = typing
-        ? text.slice(0, currentText.length + 1)
-        : currentText.slice(0, -1);
-      displayedRef.current = next;
-      setDisplayed(next);
-
-      if (next !== text) {
-        timeoutId = window.setTimeout(step, stepDelay);
-      }
-    };
-
-    timeoutId = window.setTimeout(step, TYPEWRITER_PAUSE + stepDelay);
-    return () => window.clearTimeout(timeoutId);
-  }, [text]);
-
-  return (
-    <span className="app-typewriter" aria-label={text}>
-      <span className="app-typewriter-reserve" aria-hidden="true">
-        {renderTypedText(reserve, codeToken)}
-      </span>
-      <span className="app-typewriter-value" aria-hidden="true">
-        {renderTypedText(displayed, codeToken)}
-      </span>
-    </span>
-  );
-}
-
-function ErrorNotice({
-  error,
-  onDismiss,
-  className = '',
-}: {
-  error: AppError;
-  onDismiss: () => void;
-  className?: string;
-}) {
-  return (
-    <div className={`app-error-notice ${className}`.trim()} role="alert">
-      <div>
-        <strong>{error.title}</strong>
-        <p>{error.detail}</p>
-      </div>
-      <button type="button" aria-label="Dismiss error" onClick={onDismiss}>
-        ×
-      </button>
-    </div>
-  );
-}
-
-function UndoNotice({ undo, onUndo }: { undo: UndoState; onUndo: () => void }) {
-  return (
-    <div className="app-undo-toast" role="status">
-      <div>
-        <strong>{undo.title}</strong>
-        <small>{undo.detail}</small>
-      </div>
-      <button type="button" onClick={onUndo}>Undo</button>
-    </div>
-  );
-}
-
-function jsonErrorLocation(error: SyntaxError, content: string): string {
-  const position = error.message.match(/position\s+(\d+)/i)?.[1];
-  if (!position) return '';
-
-  const offset = Number(position);
-  const lines = content.slice(0, offset).split('\n');
-  return ` near line ${lines.length}, column ${lines.at(-1)!.length + 1}`;
-}
-
-function formatBookmarkError(
-  error: unknown,
-  content: string,
-  title: string,
-): AppError {
-  if (error instanceof SyntaxError) {
-    return {
-      title,
-      detail: `File contains invalid JSON${jsonErrorLocation(error, content)}. Check its syntax and try again.`,
-    };
-  }
-
-  const message = error instanceof Error ? error.message : '';
-  if (message === 'Expected a JSON array of bookmarks.') {
-    return {
-      title,
-      detail: 'Top level must be an array of bookmark objects.',
-    };
-  }
-
-  const fieldError = message.match(/^Bookmark (\d+)\.([\w]+) must be (.+)\.$/);
-  if (fieldError) {
-    const [, index, field, requirement] = fieldError;
-    const friendlyRequirement = requirement === 'a valid HTTP(S) URL'
-      ? 'a valid http:// or https:// address'
-      : requirement === 'a string array'
-        ? 'an array containing only text values'
-        : requirement;
-    return {
-      title,
-      detail: `Bookmark ${index}: “${field}” must be ${friendlyRequirement}.`,
-    };
-  }
-
-  const bookmarkError = message.match(/^Bookmark (\d+) must be an object\.$/);
-  if (bookmarkError) {
-    return {
-      title,
-      detail: `Bookmark ${bookmarkError[1]} must be a bookmark object.`,
-    };
-  }
-
-  return {
-    title,
-    detail: 'Bookmark data could not be validated. Check the file and try again.',
-  };
-}
-
-function MetaList({ label, values }: { label: string; values?: string[] }) {
-  if (!values?.length) return null;
-  return (
-    <div className="app-meta-row">
-      <dt>{label}</dt>
-      <dd>{values.join(' · ')}</dd>
-    </div>
-  );
-}
-
-function tierRank(tier: string): string {
-  return tier.toUpperCase().replace('-TIER', '').trim();
 }
 
 function App() {
