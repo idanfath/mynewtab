@@ -2,6 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeUrl } from '../src/lib.ts';
 import {
+    BACKUP_KEY,
+    STORAGE_KEY,
+    loadStoredBookmarks,
     parseBookmarks,
     reorderBookmarkSections,
     searchBookmarks,
@@ -67,4 +70,23 @@ test('matches every search token across different bookmark fields', () => {
         searchBookmarks(bookmarks, 'download stream').map((bookmark) => bookmark.title),
         ['Anime Vault'],
     );
+});
+
+test('keeps a backup of stored data it cannot read', () => {
+    const values = new Map([[STORAGE_KEY, '{broken']]);
+    const storage = {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => void values.set(key, value),
+    };
+
+    assert.deepEqual(loadStoredBookmarks(storage), { bookmarks: [], recovery: 'backed-up' });
+    assert.equal(values.get(BACKUP_KEY), '{broken');
+
+    storage.setItem = () => {
+        throw new Error('full');
+    };
+    assert.equal(loadStoredBookmarks(storage).recovery, 'backup-failed');
+
+    values.set(STORAGE_KEY, '[]');
+    assert.deepEqual(loadStoredBookmarks(storage), { bookmarks: [] });
 });

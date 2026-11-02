@@ -48,6 +48,28 @@ const searchKeys = [
     { name: 'url', weight: 0.6 },
 ];
 
+export const STORAGE_KEY = 'newtab-directory-bookmarks';
+export const BACKUP_KEY = `${STORAGE_KEY}-corrupt-backup`;
+
+export function loadStoredBookmarks(
+    storage: Pick<Storage, 'getItem' | 'setItem'>,
+): { bookmarks: Bookmark[]; recovery?: 'backed-up' | 'backup-failed' } {
+    const stored = storage.getItem(STORAGE_KEY);
+    if (!stored) return { bookmarks: [] };
+
+    try {
+        return { bookmarks: parseBookmarks(stored) };
+    } catch {
+        // Copy instead of move: the original stays readable until a save replaces it.
+        try {
+            storage.setItem(BACKUP_KEY, stored);
+            return { bookmarks: [], recovery: 'backed-up' };
+        } catch {
+            return { bookmarks: [], recovery: 'backup-failed' };
+        }
+    }
+}
+
 export function parseBookmarks(content: string): Bookmark[] {
     if (!content.trim()) return [];
 

@@ -12,6 +12,9 @@ import BookmarkDialog from './BookmarkDialog';
 import SectionDialog from './SectionDialog';
 import { getFaviconUrl, normalizeUrl } from './lib';
 import {
+  BACKUP_KEY,
+  STORAGE_KEY,
+  loadStoredBookmarks,
   parseBookmarks,
   reorderBookmarkSections,
   searchBookmarks,
@@ -19,7 +22,6 @@ import {
 } from './bookmarks';
 import './App.css';
 
-const STORAGE_KEY = 'newtab-directory-bookmarks';
 const EMPTY_HEADING = 'Bring your index.';
 const DROP_HEADING = 'Drop your file.';
 const URL_DROP_HEADING = 'Drop your URL.';
@@ -53,15 +55,6 @@ type BookmarkDialogState =
 interface SectionDialogState {
   mode: 'rename' | 'delete';
   section: string;
-}
-
-function loadStoredBookmarks(): Bookmark[] {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    return stored ? parseBookmarks(stored) : [];
-  } catch {
-    return [];
-  }
 }
 
 function detectDropMode(
@@ -298,8 +291,29 @@ function tierRank(tier: string): string {
   return tier.toUpperCase().replace('-TIER', '').trim();
 }
 
+function loadInitialState(): { bookmarks: Bookmark[]; error: AppError | null } {
+  try {
+    const { bookmarks, recovery } = loadStoredBookmarks(localStorage);
+    if (!recovery) return { bookmarks, error: null };
+
+    return {
+      bookmarks,
+      error: {
+        title: 'Couldn’t read saved bookmarks',
+        detail: recovery === 'backed-up'
+          ? `A copy is kept in localStorage under ${BACKUP_KEY}, so new changes won’t lose it.`
+          : `No backup could be made and the next save will overwrite them. Copy localStorage key ${STORAGE_KEY} first.`,
+      },
+    };
+  } catch {
+    return { bookmarks: [], error: null };
+  }
+}
+
+const initialState = loadInitialState();
+
 function App() {
-  const [bookmarks, setBookmarks] = useState<Bookmark[]>(loadStoredBookmarks);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>(initialState.bookmarks);
   const [query, setQuery] = useState('');
   const [section, setSection] = useState('All');
   const [activeBookmark, setActiveBookmark] = useState<Bookmark | null>(null);
@@ -314,7 +328,7 @@ function App() {
   const [editorClosing, setEditorClosing] = useState(false);
   const [editorContent, setEditorContent] = useState('');
   const [editorError, setEditorError] = useState<AppError | null>(null);
-  const [error, setError] = useState<AppError | null>(null);
+  const [error, setError] = useState<AppError | null>(initialState.error);
   const [dropMode, setDropMode] = useState<DropMode>(null);
   const [urlDropSection, setUrlDropSection] = useState<string | null>(null);
   const [undoState, setUndoState] = useState<UndoState | null>(null);

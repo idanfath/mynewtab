@@ -43,16 +43,16 @@ Optional fields: `subsection`, `description`, `iconUrl`, `categories`, `capabili
 ## Development
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 Other scripts:
 
 ```bash
-npm run build
-npm run lint
-npm test
+pnpm build
+pnpm lint
+pnpm test
 ```
 
 Production output is written to `dist/`.
