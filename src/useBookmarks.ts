@@ -4,7 +4,7 @@ import {
   STORAGE_KEY,
   loadStoredBookmarks,
   type Bookmark,
-} from './bookmarks';
+} from './bookmarks.ts';
 
 export interface AppError {
   title: string;
@@ -31,9 +31,13 @@ export function storageError(title: string): AppError {
   };
 }
 
-function loadInitialState(): { bookmarks: Bookmark[]; error: AppError | null } {
+export type InitialState = { bookmarks: Bookmark[]; error: AppError | null };
+
+export function buildInitialState(
+  storage: Pick<Storage, 'getItem' | 'setItem'>,
+): InitialState {
   try {
-    const { bookmarks, recovery, failure } = loadStoredBookmarks(localStorage);
+    const { bookmarks, recovery, failure } = loadStoredBookmarks(storage);
     if (!recovery) return { bookmarks, error: null };
 
     const cause = failure === 'invalid'
@@ -51,6 +55,10 @@ function loadInitialState(): { bookmarks: Bookmark[]; error: AppError | null } {
   } catch {
     return { bookmarks: [], error: null };
   }
+}
+
+function loadInitialState(): InitialState {
+  return buildInitialState(localStorage);
 }
 
 export function useBookmarks() {
