@@ -33,16 +33,19 @@ export function storageError(title: string): AppError {
 
 function loadInitialState(): { bookmarks: Bookmark[]; error: AppError | null } {
   try {
-    const { bookmarks, recovery } = loadStoredBookmarks(localStorage);
+    const { bookmarks, recovery, failure } = loadStoredBookmarks(localStorage);
     if (!recovery) return { bookmarks, error: null };
 
+    const cause = failure === 'invalid'
+      ? 'The saved data is complete JSON but has invalid bookmark entries.'
+      : 'The saved data looks truncated or is not valid JSON.';
     return {
       bookmarks,
       error: {
         title: 'Couldn’t read saved bookmarks',
         detail: recovery === 'backed-up'
-          ? `A copy is kept in localStorage under ${BACKUP_KEY}, so new changes won’t lose it.`
-          : `No backup could be made and the next save will overwrite them. Copy localStorage key ${STORAGE_KEY} first.`,
+          ? `${cause} A copy is kept in localStorage under ${BACKUP_KEY}, so new changes won’t lose it.`
+          : `${cause} No backup could be made and the next save will overwrite them. Copy localStorage key ${STORAGE_KEY} first.`,
       },
     };
   } catch {

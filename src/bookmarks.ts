@@ -51,23 +51,36 @@ const searchKeys = [
 export const STORAGE_KEY = 'newtab-directory-bookmarks';
 export const BACKUP_KEY = `${STORAGE_KEY}-corrupt-backup`;
 
-export function loadStoredBookmarks(
-    storage: Pick<Storage, 'getItem' | 'setItem'>,
-): { bookmarks: Bookmark[]; recovery?: 'backed-up' | 'backup-failed' } {
-    const stored = storage.getItem(STORAGE_KEY);
-    if (!stored) return { bookmarks: [] };
+export type StoredDataFailure = 'truncated' | 'invalid';
 
+export function classifyStoredDataFailure(error: unknown): StoredDataFailure {
+  // JSON.parse throws SyntaxError on truncated/malformed JSON; anything
+  // else is a well-formed value that fails schema validation.
+  return error instanceof SyntaxError ? 'truncated' : 'invalid';
+}
+
+export function loadStoredBookmarks(
+  storage: Pick<Storage, 'getItem' | 'setItem'>,
+): {
+    bookmarks: Bookmark[];
+    recovery?: 'backed-up' | 'backup-failed';
+    failure?: StoredDataFailure;
+  } {
+  const stored = storage.getItem(STORAGE_KEY);
+  if (!stored) return { bookmarks: [] };
+
+  try {
+    return { bookmarks: parseBookmarks(stored) };
+  } catch (parseError) {
+    const failure = classifyStoredDataFailure(parseError);
+    // Copy instead of move: the original stays readable until a save replaces it.
     try {
-        return { bookmarks: parseBookmarks(stored) };
+      storage.setItem(BACKUP_KEY, stored);
+      return { bookmarks: [], recovery: 'backed-up', failure };
     } catch {
-        // Copy instead of move: the original stays readable until a save replaces it.
-        try {
-            storage.setItem(BACKUP_KEY, stored);
-            return { bookmarks: [], recovery: 'backed-up' };
-        } catch {
-            return { bookmarks: [], recovery: 'backup-failed' };
-        }
+      return { bookmarks: [], recovery: 'backup-failed', failure };
     }
+  }
 }
 
 export function parseBookmarks(content: string): Bookmark[] {

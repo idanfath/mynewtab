@@ -79,13 +79,28 @@ test('keeps a backup of stored data it cannot read', () => {
         setItem: (key: string, value: string) => void values.set(key, value),
     };
 
-    assert.deepEqual(loadStoredBookmarks(storage), { bookmarks: [], recovery: 'backed-up' });
+    assert.deepEqual(loadStoredBookmarks(storage), {
+        bookmarks: [],
+        recovery: 'backed-up',
+        failure: 'truncated',
+    });
     assert.equal(values.get(BACKUP_KEY), '{broken');
 
     storage.setItem = () => {
         throw new Error('full');
     };
-    assert.equal(loadStoredBookmarks(storage).recovery, 'backup-failed');
+    assert.deepEqual(loadStoredBookmarks(storage), {
+        bookmarks: [],
+        recovery: 'backup-failed',
+        failure: 'truncated',
+    });
+
+    values.set(STORAGE_KEY, '[{"title":1,"url":"x","section":"y"}]');
+    assert.deepEqual(loadStoredBookmarks(storage), {
+        bookmarks: [],
+        recovery: 'backup-failed',
+        failure: 'invalid',
+    });
 
     values.set(STORAGE_KEY, '[]');
     assert.deepEqual(loadStoredBookmarks(storage), { bookmarks: [] });
