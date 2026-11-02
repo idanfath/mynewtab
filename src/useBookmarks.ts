@@ -50,9 +50,10 @@ function loadInitialState(): { bookmarks: Bookmark[]; error: AppError | null } {
   }
 }
 
-const initialState = loadInitialState();
-
 export function useBookmarks() {
+  // Lazy initializer: runs once per mount instead of at module import,
+  // so tests/SSR importing this module pay no localStorage cost.
+  const [initialState] = useState(loadInitialState);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>(initialState.bookmarks);
   const [undoState, setUndoState] = useState<UndoState | null>(null);
 
