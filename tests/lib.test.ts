@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { normalizeUrl } from '../src/lib.ts';
+import { urlIdentity } from '../src/lib.ts';
 import {
     BACKUP_KEY,
     STORAGE_KEY,
@@ -25,6 +26,17 @@ test('normalizes shorthand domains and rejects unsafe schemes', () => {
     assert.equal(normalizeUrl('https://example.com'), 'https://example.com/');
     assert.equal(normalizeUrl('javascript://alert(1)'), '');
     assert.equal(normalizeUrl('mailto:user@example.com'), '');
+});
+
+test('treats URL variants as the same identity', () => {
+    assert.equal(urlIdentity('https://example.com'), urlIdentity('https://example.com/'));
+    assert.equal(urlIdentity('https://example.com'), urlIdentity('https://EXAMPLE.com/'));
+    assert.equal(urlIdentity('https://example.com:443/a'), urlIdentity('https://example.com/a'));
+    assert.equal(urlIdentity('http://example.com:80/a/'), urlIdentity('http://example.com/a'));
+    assert.equal(urlIdentity('https://example.com/a#frag'), urlIdentity('https://example.com/a'));
+    assert.equal(urlIdentity('https://example.com/?b=2&a=1'), urlIdentity('https://example.com/?a=1&b=2'));
+    assert.notEqual(urlIdentity('https://example.com/a'), urlIdentity('https://example.com/b'));
+    assert.equal(urlIdentity('not a url'), '');
 });
 
 test('accepts bookmark data only when its shape and URLs are valid', () => {

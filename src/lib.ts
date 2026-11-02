@@ -17,6 +17,29 @@ export function normalizeUrl(url: string): string {
     }
 }
 
+// Identity key for duplicate detection: lowercase host, strip default
+// ports, drop trailing slash (except root), ignore fragment, sort query.
+export function urlIdentity(url: string): string {
+    const normalized = normalizeUrl(url);
+    if (!normalized) return '';
+
+    try {
+        const parsed = new URL(normalized);
+        const host = parsed.hostname.toLowerCase();
+        const isDefaultPort = (parsed.protocol === 'http:' && parsed.port === '80')
+            || (parsed.protocol === 'https:' && parsed.port === '443');
+        const port = !parsed.port || isDefaultPort ? '' : `:${parsed.port}`;
+        const path = parsed.pathname.replace(/\/+$/, '') || '/';
+        const params = new URLSearchParams(parsed.search);
+        params.sort();
+        const query = [...params].length ? `?${params}` : '';
+
+        return `${parsed.protocol}//${host}${port}${path}${query}`;
+    } catch {
+        return normalized;
+    }
+}
+
 export function getFaviconUrl(url: string, size = 64): string {
     const normalizedUrl = normalizeUrl(url);
     if (!normalizedUrl) return '';

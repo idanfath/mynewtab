@@ -10,7 +10,7 @@ import Editor from '@monaco-editor/react';
 import icon from './assets/icon.png';
 import BookmarkDialog from './BookmarkDialog';
 import SectionDialog from './SectionDialog';
-import { getFaviconUrl, normalizeUrl } from './lib';
+import { getFaviconUrl, normalizeUrl, urlIdentity } from './lib';
 import TypewriterText, { TYPEWRITER_DURATION } from './TypewriterText';
 import { useBookmarks, storageError, type AppError } from './useBookmarks';
 import { ErrorNotice, MetaList, UndoNotice } from './notices';
@@ -295,7 +295,7 @@ function App() {
     }
 
     const duplicate = bookmarks.find(
-      (bookmark) => normalizeUrl(bookmark.url) === url,
+      (bookmark) => urlIdentity(bookmark.url) === urlIdentity(url),
     );
     if (duplicate) {
       setError({
@@ -362,10 +362,10 @@ function App() {
     const editingBookmark = bookmarkDialog?.mode === 'edit'
       ? bookmarkDialog.bookmark
       : null;
-    const normalizedUrl = normalizeUrl(nextBookmark.url);
+    const bookmarkIdentity = urlIdentity(nextBookmark.url);
     const duplicate = bookmarks.find(
       (bookmark) => bookmark !== editingBookmark
-        && normalizeUrl(bookmark.url) === normalizedUrl,
+        && urlIdentity(bookmark.url) === bookmarkIdentity,
     );
     if (duplicate) return `“${duplicate.title}” already uses this URL.`;
 
