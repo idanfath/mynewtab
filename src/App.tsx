@@ -11,10 +11,8 @@ import icon from './assets/icon.png';
 import BookmarkDialog from './BookmarkDialog';
 import SectionDialog from './SectionDialog';
 import { getFaviconUrl, normalizeUrl } from './lib';
+import { useBookmarks, storageError, type AppError, type UndoState } from './useBookmarks';
 import {
-  BACKUP_KEY,
-  STORAGE_KEY,
-  loadStoredBookmarks,
   parseBookmarks,
   reorderBookmarkSections,
   searchBookmarks,
@@ -33,20 +31,6 @@ const TYPEWRITER_DURATION = 1300;
 const TYPEWRITER_PAUSE = 55;
 
 type DropMode = 'file' | 'url' | null;
-
-interface AppError {
-  title: string;
-  detail: string;
-}
-
-interface UndoState {
-  title: string;
-  detail: string;
-  bookmarks: Bookmark[];
-  section: string;
-  query: string;
-  activeBookmark: Bookmark | null;
-}
 
 type BookmarkDialogState =
   | { mode: 'add'; initialSection: string }
@@ -270,13 +254,6 @@ function formatBookmarkError(
   };
 }
 
-function storageError(title: string): AppError {
-  return {
-    title,
-    detail: 'Browser storage is full, blocked, or unavailable. Existing bookmarks were not changed.',
-  };
-}
-
 function MetaList({ label, values }: { label: string; values?: string[] }) {
   if (!values?.length) return null;
   return (
@@ -291,29 +268,15 @@ function tierRank(tier: string): string {
   return tier.toUpperCase().replace('-TIER', '').trim();
 }
 
-function loadInitialState(): { bookmarks: Bookmark[]; error: AppError | null } {
-  try {
-    const { bookmarks, recovery } = loadStoredBookmarks(localStorage);
-    if (!recovery) return { bookmarks, error: null };
-
-    return {
-      bookmarks,
-      error: {
-        title: 'Couldn’t read saved bookmarks',
-        detail: recovery === 'backed-up'
-          ? `A copy is kept in localStorage under ${BACKUP_KEY}, so new changes won’t lose it.`
-          : `No backup could be made and the next save will overwrite them. Copy localStorage key ${STORAGE_KEY} first.`,
-      },
-    };
-  } catch {
-    return { bookmarks: [], error: null };
-  }
-}
-
-const initialState = loadInitialState();
-
 function App() {
-  const [bookmarks, setBookmarks] = useState<Bookmark[]>(initialState.bookmarks);
+  const {
+    bookmarks,
+    initialError,
+    undoState,
+    persist,
+    restoreUndo,
+    clearUndo,
+  } = useBookmarks();
   const [query, setQuery] = useState('');
   const [section, setSection] = useState('All');
   const [activeBookmark, setActiveBookmark] = useState<Bookmark | null>(null);
@@ -328,10 +291,9 @@ function App() {
   const [editorClosing, setEditorClosing] = useState(false);
   const [editorContent, setEditorContent] = useState('');
   const [editorError, setEditorError] = useState<AppError | null>(null);
-  const [error, setError] = useState<AppError | null>(initialState.error);
+  const [error, setError] = useState<AppError | null>(() => initialError);
   const [dropMode, setDropMode] = useState<DropMode>(null);
   const [urlDropSection, setUrlDropSection] = useState<string | null>(null);
-  const [undoState, setUndoState] = useState<UndoState | null>(null);
   const [bookmarkDialog, setBookmarkDialog] = useState<BookmarkDialogState | null>(null);
   const [sectionDialog, setSectionDialog] = useState<SectionDialogState | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -370,12 +332,6 @@ function App() {
     document.addEventListener('keydown', handleShortcut);
     return () => document.removeEventListener('keydown', handleShortcut);
   }, [bookmarkDialog, editorOpen, section, sectionDialog]);
-
-  useEffect(() => {
-    if (!undoState) return;
-    const timeoutId = window.setTimeout(() => setUndoState(null), 6500);
-    return () => window.clearTimeout(timeoutId);
-  }, [undoState]);
 
   const sectionCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -424,14 +380,15 @@ function App() {
   };
 
   const applyBookmarks = (nextBookmarks: Bookmark[]) => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
-    setBookmarks(nextBookmarks);
+    if (!persist(nextBookmarks, null)) {
+      setError(storageError('Couldn’t import bookmarks'));
+      return;
+    }
     setSection('All');
     setQuery('');
     setActiveBookmark(nextBookmarks[0] ?? null);
     setKeyboardSelection(false);
     setError(null);
-    setUndoState(null);
   };
 
   const reorderSection = (
@@ -447,13 +404,11 @@ function App() {
       target,
       position,
     );
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
-      setBookmarks(nextBookmarks);
+    if (persist(nextBookmarks, null)) {
       setActiveBookmark(null);
       setKeyboardSelection(false);
       setError(null);
-    } catch {
+    } else {
       setError(storageError('Couldn’t save section order'));
     }
   };
@@ -478,11 +433,7 @@ function App() {
       return;
     }
 
-    try {
-      applyBookmarks(nextBookmarks);
-    } catch {
-      setError(storageError('Couldn’t import bookmarks'));
-    }
+    applyBookmarks(nextBookmarks);
   };
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -506,7 +457,7 @@ function App() {
     if (!mode) return;
     event.preventDefault();
     dropDepthRef.current += 1;
-    if (mode === 'url') setUndoState(null);
+    if (mode === 'url') clearUndo();
     setDropMode(mode);
   };
 
@@ -582,23 +533,19 @@ function App() {
     };
     const nextBookmarks = [...bookmarks, bookmark];
 
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
-      setBookmarks(nextBookmarks);
+    if (persist(nextBookmarks, {
+      title: `Saved to ${targetSection}`,
+      detail: bookmark.title,
+      section,
+      query,
+      activeBookmark,
+    })) {
       setSection(targetSection);
       setQuery('');
       setActiveBookmark(bookmark);
       setKeyboardSelection(false);
       setError(null);
-      setUndoState({
-        title: `Saved to ${targetSection}`,
-        detail: bookmark.title,
-        bookmarks,
-        section,
-        query,
-        activeBookmark,
-      });
-    } catch {
+    } else {
       setError(storageError('Couldn’t save URL'));
     }
   };
@@ -620,19 +567,16 @@ function App() {
   };
 
   const undoLastChange = () => {
-    if (!undoState) return;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(undoState.bookmarks));
-      setBookmarks(undoState.bookmarks);
-      setSection(undoState.section);
-      setQuery(undoState.query);
-      setActiveBookmark(undoState.activeBookmark);
-      setKeyboardSelection(false);
-      setUndoState(null);
-      setError(null);
-    } catch {
-      setError(storageError('Couldn’t undo last change'));
+    const restored = restoreUndo();
+    if (!restored || 'error' in restored) {
+      if (restored && 'error' in restored) setError(restored.error);
+      return;
     }
+    setSection(restored.section);
+    setQuery(restored.query);
+    setActiveBookmark(restored.activeBookmark);
+    setKeyboardSelection(false);
+    setError(null);
   };
 
   const saveBookmark = (nextBookmark: Bookmark): string | null => {
@@ -651,20 +595,16 @@ function App() {
         bookmark === editingBookmark ? nextBookmark : bookmark)
       : [...bookmarks, nextBookmark];
 
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
-      setBookmarks(nextBookmarks);
+    if (persist(nextBookmarks, null)) {
       setSection(nextBookmark.section);
       setQuery('');
       setActiveBookmark(nextBookmark);
       setKeyboardSelection(false);
       setError(null);
-      setUndoState(null);
       setBookmarkDialog(null);
       return null;
-    } catch {
-      return 'Browser storage is full, blocked, or unavailable.';
     }
+    return 'Browser storage is full, blocked, or unavailable.';
   };
 
   const deleteBookmark = (bookmarkToDelete: Bookmark) => {
@@ -676,23 +616,19 @@ function App() {
       ? 'All'
       : section;
 
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
-      setBookmarks(nextBookmarks);
+    if (persist(nextBookmarks, {
+      title: 'Bookmark removed',
+      detail: bookmarkToDelete.title,
+      section,
+      query,
+      activeBookmark,
+    })) {
       setSection(nextSection);
       setActiveBookmark(null);
       setKeyboardSelection(false);
       setError(null);
       setBookmarkDialog(null);
-      setUndoState({
-        title: 'Bookmark removed',
-        detail: bookmarkToDelete.title,
-        bookmarks,
-        section,
-        query,
-        activeBookmark,
-      });
-    } catch {
+    } else {
       setError(storageError('Couldn’t remove bookmark'));
     }
   };
@@ -720,19 +656,15 @@ function App() {
       return renamed;
     });
 
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
-      setBookmarks(nextBookmarks);
+    if (persist(nextBookmarks, null)) {
       setSection(nextName);
       setActiveBookmark(nextActiveBookmark);
       setKeyboardSelection(false);
       setError(null);
-      setUndoState(null);
       setSectionDialog(null);
       return null;
-    } catch {
-      return 'Browser storage is full, blocked, or unavailable.';
     }
+    return 'Browser storage is full, blocked, or unavailable.';
   };
 
   const deleteSection = (
@@ -753,28 +685,23 @@ function App() {
           : bookmark)
       : bookmarks.filter((bookmark) => bookmark.section !== sectionToDelete);
 
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
-      setBookmarks(nextBookmarks);
+    if (persist(nextBookmarks, {
+      title: strategy === 'move' ? 'Section removed' : 'Section and bookmarks removed',
+      detail: strategy === 'move'
+        ? `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} moved to ${destination}.`
+        : `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} removed from ${sectionToDelete}.`,
+      section,
+      query,
+      activeBookmark,
+    })) {
       setSection(strategy === 'move' ? destination! : 'All');
       setActiveBookmark(null);
       setKeyboardSelection(false);
       setError(null);
       setSectionDialog(null);
-      setUndoState({
-        title: strategy === 'move' ? 'Section removed' : 'Section and bookmarks removed',
-        detail: strategy === 'move'
-          ? `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} moved to ${destination}.`
-          : `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} removed from ${sectionToDelete}.`,
-        bookmarks,
-        section,
-        query,
-        activeBookmark,
-      });
       return null;
-    } catch {
-      return 'Browser storage is full, blocked, or unavailable.';
     }
+    return 'Browser storage is full, blocked, or unavailable.';
   };
 
   const chooseFile = () => {
