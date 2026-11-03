@@ -11,7 +11,7 @@ import {
     reorderBookmarkSections,
     searchBookmarks,
 } from '../src/bookmarks.ts';
-import { buildInitialState } from '../src/useBookmarks.ts';
+import { buildInitialState, loadInitialState } from '../src/useBookmarks.ts';
 
 function memoryStorage(values = new Map<string, string>()) {
     return {
@@ -33,9 +33,10 @@ test('treats URL variants as the same identity', () => {
     assert.equal(urlIdentity('https://example.com'), urlIdentity('https://EXAMPLE.com/'));
     assert.equal(urlIdentity('https://example.com:443/a'), urlIdentity('https://example.com/a'));
     assert.equal(urlIdentity('http://example.com:80/a/'), urlIdentity('http://example.com/a'));
-    assert.equal(urlIdentity('https://example.com/a#frag'), urlIdentity('https://example.com/a'));
     assert.equal(urlIdentity('https://example.com/?b=2&a=1'), urlIdentity('https://example.com/?a=1&b=2'));
     assert.notEqual(urlIdentity('https://example.com/a'), urlIdentity('https://example.com/b'));
+    assert.notEqual(urlIdentity('https://example.com/#/inbox'), urlIdentity('https://example.com/#/sent'));
+    assert.notEqual(urlIdentity('https://example.com/a#frag'), urlIdentity('https://example.com/a'));
     assert.equal(urlIdentity('not a url'), '');
 });
 
@@ -161,4 +162,20 @@ test('builds load state with happy path and corrupt-backup errors', () => {
 
     const emptyState = buildInitialState(memoryStorage());
     assert.deepEqual(emptyState, { bookmarks: [], error: null });
+});
+
+test('starts empty instead of crashing when storage access is blocked', (context) => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    context.after(() => {
+        if (original) Object.defineProperty(globalThis, 'localStorage', original);
+        else delete (globalThis as { localStorage?: unknown }).localStorage;
+    });
+    Object.defineProperty(globalThis, 'localStorage', {
+        configurable: true,
+        get() {
+            throw new Error('SecurityError');
+        },
+    });
+
+    assert.deepEqual(loadInitialState(), { bookmarks: [], error: null });
 });

@@ -57,8 +57,13 @@ export function buildInitialState(
   }
 }
 
-function loadInitialState(): InitialState {
-  return buildInitialState(localStorage);
+export function loadInitialState(): InitialState {
+  try {
+    // Reading the localStorage global itself throws when site data is blocked.
+    return buildInitialState(localStorage);
+  } catch {
+    return { bookmarks: [], error: null };
+  }
 }
 
 export function useBookmarks() {

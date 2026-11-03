@@ -18,7 +18,8 @@ export function normalizeUrl(url: string): string {
 }
 
 // Identity key for duplicate detection: lowercase host, strip default
-// ports, drop trailing slash (except root), ignore fragment, sort query.
+// ports, drop trailing slash (except root), sort query. Fragment stays:
+// hash-routed pages and doc anchors are different destinations.
 export function urlIdentity(url: string): string {
     const normalized = normalizeUrl(url);
     if (!normalized) return '';
@@ -34,7 +35,7 @@ export function urlIdentity(url: string): string {
         params.sort();
         const query = [...params].length ? `?${params}` : '';
 
-        return `${parsed.protocol}//${host}${port}${path}${query}`;
+        return `${parsed.protocol}//${host}${port}${path}${query}${parsed.hash}`;
     } catch {
         return normalized;
     }
