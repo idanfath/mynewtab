@@ -11,6 +11,8 @@ Personal new-tab page built with React, TypeScript, Vite, Tailwind CSS, and Mona
 - Drop browser links into a section, or anywhere to use `Uncategorized`.
 - Local persistence through `localStorage`.
 - Fuzzy search across titles, sections, categories, capabilities, and notes.
+- Unified omnibar (`/`) supporting `!bang` shortcuts, bookmark site search, direct URL/localhost navigation, and web search (`Tab` to autocomplete `!bang`, `Shift+Enter` to search web directly).
+- Configurable default search engine presets and custom `!bang` triggers persisted locally in `localStorage`.
 - Drag-and-drop section ordering.
 - Bundled background and app icon assets with production caching on Vercel.
 
@@ -24,6 +26,8 @@ Bookmarks are stored as a JSON array. `title`, `url`, and `section` are required
     "title": "GitHub",
     "url": "https://github.com/",
     "section": "Development",
+    "alias": "gh",
+    "searchUrl": "https://github.com/search?q=%s",
     "subsection": "Code",
     "description": "Code hosting and collaboration",
     "categories": ["Code"],
@@ -38,7 +42,7 @@ Bookmarks are stored as a JSON array. `title`, `url`, and `section` are required
 ]
 ```
 
-Optional fields: `subsection`, `description`, `iconUrl`, `categories`, `capabilities`, `pros`, `cons`, `formats`, `tier`, and `product`.
+Optional fields: `alias`, `searchUrl`, `subsection`, `description`, `iconUrl`, `categories`, `capabilities`, `pros`, `cons`, `formats`, `tier`, and `product`.
 
 ## Development
 

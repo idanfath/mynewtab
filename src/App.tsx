@@ -13,10 +13,29 @@ import Editor from '@monaco-editor/react';
 import icon from './assets/icon.png';
 import BookmarkDialog from './BookmarkDialog';
 import ContextMenu, { type ContextMenuTarget } from './ContextMenu';
+import SearchSettingsDialog from './SearchSettingsDialog';
 import SectionDialog from './SectionDialog';
-import { getFaviconUrl, normalizeUrl, urlIdentity } from './lib';
+import {
+  getFaviconUrl,
+  normalizeAlias,
+  normalizeSearchUrl,
+  normalizeUrl,
+  safeHostname,
+  urlIdentity,
+} from './lib';
+import {
+  buildWebSearchUrl,
+  getActiveSearchEngine,
+  getOmnibarGlyph,
+  resolveOmnibar,
+  resolveTabCompletion,
+  type OmnibarAction,
+  type OmnibarActionKind,
+  type OmnibarSettings,
+} from './omnibar';
 import TypewriterText, { TYPEWRITER_DURATION } from './TypewriterText';
 import { useBookmarks, storageError, type AppError } from './useBookmarks';
+import { mergeStartupErrors, useOmnibarSettings } from './useOmnibarSettings';
 import { ErrorNotice, MetaList, UndoNotice } from './notices';
 import { formatBookmarkError } from './formatBookmarkError';
 import { tierRank } from './tierRank';
@@ -69,6 +88,45 @@ interface StatusToast {
   detail?: string;
 }
 
+type SelectionOverride =
+  | { kind: 'omnibar' }
+  | { kind: 'bookmark'; bookmark: Bookmark }
+  | null;
+
+type NavItem =
+  | { kind: 'omnibar'; action: OmnibarAction }
+  | { kind: 'bookmark'; bookmark: Bookmark };
+
+function resolveBookmarkIconSrc(bookmark: Bookmark, size: number): string | undefined {
+  const custom = bookmark.iconUrl ? normalizeUrl(bookmark.iconUrl) : '';
+  if (custom) return custom;
+  return getFaviconUrl(bookmark.url, size) || undefined;
+}
+
+function getBookmarkMonogram(bookmark: Bookmark): string {
+  const trimmed = bookmark.title.trim();
+  return (trimmed.charAt(0) || '?').toUpperCase();
+}
+
+function omnibarKindLabel(kind: OmnibarActionKind): string {
+  switch (kind) {
+    case 'bang-search':
+      return 'Site search';
+    case 'bang-jump':
+      return 'Shortcut jump';
+    case 'bang-incomplete':
+      return 'Shortcut list';
+    case 'bang-unknown':
+      return 'Web fallback';
+    case 'url':
+      return 'Direct URL';
+    case 'bookmark-alias':
+      return 'Bookmark shortcut';
+    case 'web-search':
+      return 'Web search';
+  }
+}
+
 function getHoveredDropSection(target: EventTarget | null): string | null {
   const element = target instanceof Element
     ? target
@@ -100,9 +158,14 @@ function App() {
     restoreUndo,
     clearUndo,
   } = useBookmarks();
+  const {
+    omnibarSettings,
+    initialOmnibarError,
+    persistOmnibarSettings,
+  } = useOmnibarSettings();
   const [query, setQuery] = useState('');
   const [section, setSection] = useState('All');
-  const [activeBookmark, setActiveBookmark] = useState<Bookmark | null>(null);
+  const [selectionOverride, setSelectionOverride] = useState<SelectionOverride>(null);
   const [keyboardSelection, setKeyboardSelection] = useState(false);
   const [draggedSection, setDraggedSection] = useState<string | null>(null);
   const [dragTarget, setDragTarget] = useState<{
@@ -116,11 +179,14 @@ function App() {
   } | null>(null);
   const [bookmarkDropSection, setBookmarkDropSection] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [searchSettingsOpen, setSearchSettingsOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorClosing, setEditorClosing] = useState(false);
   const [editorContent, setEditorContent] = useState('');
   const [editorError, setEditorError] = useState<AppError | null>(null);
-  const [error, setError] = useState<AppError | null>(() => initialError);
+  const [error, setError] = useState<AppError | null>(
+    () => mergeStartupErrors(initialError, initialOmnibarError),
+  );
   const [dropMode, setDropMode] = useState<DropMode>(null);
   const [urlDropSection, setUrlDropSection] = useState<string | null>(null);
   const [bookmarkDialog, setBookmarkDialog] = useState<BookmarkDialogState | null>(null);
@@ -145,7 +211,16 @@ function App() {
       const target = event.target as HTMLElement | null;
       const isTyping = target?.isContentEditable
         || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '');
-      if (isTyping || editorOpen || bookmarkDialog || sectionDialog || contextMenu) return;
+      if (
+        isTyping
+        || editorOpen
+        || bookmarkDialog
+        || sectionDialog
+        || contextMenu
+        || searchSettingsOpen
+      ) {
+        return;
+      }
 
       if (
         event.key === '/'
@@ -171,7 +246,7 @@ function App() {
     };
     document.addEventListener('keydown', handleShortcut);
     return () => document.removeEventListener('keydown', handleShortcut);
-  }, [bookmarkDialog, contextMenu, editorOpen, section, sectionDialog]);
+  }, [bookmarkDialog, contextMenu, editorOpen, searchSettingsOpen, section, sectionDialog]);
 
   useEffect(() => {
     if (!statusToast) return;
@@ -203,6 +278,50 @@ function App() {
     return indices;
   }, [matches]);
 
+  const omnibarAction = useMemo(
+    () => resolveOmnibar(query, bookmarks, omnibarSettings, matches),
+    [query, bookmarks, omnibarSettings, matches],
+  );
+
+  const validOverride = useMemo<SelectionOverride>(() => {
+    if (!selectionOverride) return null;
+    if (selectionOverride.kind === 'omnibar') {
+      return omnibarAction ? selectionOverride : null;
+    }
+    return matches.includes(selectionOverride.bookmark) ? selectionOverride : null;
+  }, [selectionOverride, omnibarAction, matches]);
+
+  const navItems = useMemo<NavItem[]>(() => {
+    const items: NavItem[] = [];
+    if (omnibarAction) items.push({ kind: 'omnibar', action: omnibarAction });
+    for (const bookmark of matches) {
+      items.push({ kind: 'bookmark', bookmark });
+    }
+    return items;
+  }, [omnibarAction, matches]);
+
+  const effectiveTarget = useMemo<NavItem | null>(() => {
+    if (validOverride) {
+      return validOverride.kind === 'omnibar'
+        ? { kind: 'omnibar', action: omnibarAction! }
+        : { kind: 'bookmark', bookmark: validOverride.bookmark };
+    }
+    if (omnibarAction && (omnibarAction.autoSelect || matches.length === 0)) {
+      return { kind: 'omnibar', action: omnibarAction };
+    }
+    if (matches.length > 0) {
+      return { kind: 'bookmark', bookmark: matches[0] };
+    }
+    return omnibarAction ? { kind: 'omnibar', action: omnibarAction } : null;
+  }, [validOverride, omnibarAction, matches]);
+
+  const inspectedBookmark: Bookmark | null =
+    effectiveTarget?.kind === 'bookmark'
+      ? effectiveTarget.bookmark
+      : effectiveTarget?.kind === 'omnibar'
+        ? effectiveTarget.action.matchedBookmark ?? null
+        : null;
+
   useEffect(() => {
     const target = pendingScrollBookmarkRef.current;
     if (!target) return;
@@ -226,36 +345,201 @@ function App() {
     return groups;
   }, [matches]);
 
-  const inspected = activeBookmark && matches.includes(activeBookmark)
-    ? activeBookmark
-    : matches[0] ?? null;
+  const clearSearch = () => {
+    setQuery('');
+    setSearchOpen(false);
+    setSelectionOverride(null);
+    setKeyboardSelection(false);
+    searchRef.current?.blur();
+  };
 
-  const selectRelativeBookmark = (direction: 1 | -1) => {
-    if (!matches.length) return;
+  const navigateTo = (destination: string, newTab: boolean) => {
+    if (!destination) return;
+    if (newTab) window.open(destination, '_blank', 'noopener,noreferrer');
+    else window.location.assign(destination);
+  };
 
-    const currentIndex = activeBookmark ? matches.indexOf(activeBookmark) : -1;
-    const nextIndex = direction === 1
-      ? (currentIndex + 1) % matches.length
-      : currentIndex <= 0 ? matches.length - 1 : currentIndex - 1;
-
+  const activateBookmarkSiteSearch = (bookmark: Bookmark) => {
+    const alias = normalizeAlias(bookmark.alias ?? '');
+    if (!alias || !normalizeSearchUrl(bookmark.searchUrl ?? '')) return;
+    const nextQuery = `!${alias} `;
+    setSearchOpen(true);
+    setQuery(nextQuery);
+    setSelectionOverride(null);
     setKeyboardSelection(true);
-    setActiveBookmark(matches[nextIndex]);
     window.requestAnimationFrame(() => {
-      document.querySelector(`[data-app-bookmark-index="${nextIndex}"]`)
-        ?.scrollIntoView({ block: 'nearest' });
+      const input = searchRef.current;
+      if (input) {
+        input.focus();
+        input.setSelectionRange(nextQuery.length, nextQuery.length);
+      }
     });
   };
 
-  const applyBookmarks = (nextBookmarks: Bookmark[]) => {
+  const selectRelativeItem = (direction: 1 | -1) => {
+    if (!navItems.length) return;
+    const currentIndex = effectiveTarget
+      ? navItems.findIndex((item) =>
+          item.kind === 'omnibar'
+            ? effectiveTarget.kind === 'omnibar'
+            : effectiveTarget.kind === 'bookmark'
+              && item.bookmark === effectiveTarget.bookmark,
+        )
+      : -1;
+    const nextIndex = direction === 1
+      ? (currentIndex + 1) % navItems.length
+      : currentIndex <= 0
+        ? navItems.length - 1
+        : currentIndex - 1;
+    const nextItem = navItems[nextIndex];
+    setKeyboardSelection(true);
+    setSelectionOverride(
+      nextItem.kind === 'omnibar'
+        ? { kind: 'omnibar' }
+        : { kind: 'bookmark', bookmark: nextItem.bookmark },
+    );
+    window.requestAnimationFrame(() => {
+      if (nextItem.kind === 'omnibar') {
+        document
+          .querySelector('[data-omnibar-action="true"]')
+          ?.scrollIntoView({ block: 'nearest' });
+      } else {
+        const bIndex = matchIndices.get(nextItem.bookmark);
+        if (bIndex !== undefined) {
+          document
+            .querySelector(`[data-app-bookmark-index="${bIndex}"]`)
+            ?.scrollIntoView({ block: 'nearest' });
+        }
+      }
+    });
+  };
+
+  const handleOmnibarKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing) return;
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      selectRelativeItem(1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      selectRelativeItem(-1);
+    } else if (
+      event.key === 'Tab'
+      && !event.shiftKey
+      && !event.ctrlKey
+      && !event.metaKey
+      && !event.altKey
+    ) {
+      const nextQuery = resolveTabCompletion(query, effectiveTarget, omnibarAction);
+      if (nextQuery !== null) {
+        event.preventDefault();
+        setQuery(nextQuery);
+        setSelectionOverride(null);
+        setKeyboardSelection(true);
+        window.requestAnimationFrame(() => {
+          const el = searchRef.current;
+          if (el) {
+            el.focus();
+            el.setSelectionRange(nextQuery.length, nextQuery.length);
+          }
+        });
+      }
+    } else if (event.key === 'Enter' && !event.altKey) {
+      if (event.shiftKey) {
+        const destination = buildWebSearchUrl(query, omnibarSettings);
+        if (destination) {
+          event.preventDefault();
+          navigateTo(destination, event.ctrlKey || event.metaKey);
+        }
+      } else {
+        const destination = effectiveTarget?.kind === 'omnibar'
+          ? effectiveTarget.action.url
+          : effectiveTarget?.kind === 'bookmark'
+            ? normalizeUrl(effectiveTarget.bookmark.url)
+            : '';
+        if (destination) {
+          event.preventDefault();
+          navigateTo(destination, event.ctrlKey || event.metaKey);
+        }
+      }
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      clearSearch();
+    }
+  };
+
+  const handleEmptyOmnibarKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing) return;
+
+    if (
+      event.key === 'Tab'
+      && !event.shiftKey
+      && !event.ctrlKey
+      && !event.metaKey
+      && !event.altKey
+    ) {
+      const emptyTarget = omnibarAction
+        ? ({ kind: 'omnibar', action: omnibarAction } as const)
+        : null;
+      const nextQuery = resolveTabCompletion(query, emptyTarget, omnibarAction);
+      if (nextQuery !== null) {
+        event.preventDefault();
+        setQuery(nextQuery);
+        setSelectionOverride(null);
+        setKeyboardSelection(true);
+        window.requestAnimationFrame(() => {
+          const el = searchRef.current;
+          if (el) {
+            el.focus();
+            el.setSelectionRange(nextQuery.length, nextQuery.length);
+          }
+        });
+      }
+    } else if (event.key === 'Enter' && !event.altKey) {
+      if (event.shiftKey) {
+        const destination = buildWebSearchUrl(query, omnibarSettings);
+        if (destination) {
+          event.preventDefault();
+          navigateTo(destination, event.ctrlKey || event.metaKey);
+        }
+      } else if (omnibarAction?.url) {
+        event.preventDefault();
+        navigateTo(omnibarAction.url, event.ctrlKey || event.metaKey);
+      }
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      clearSearch();
+    }
+  };
+
+  const saveOmnibarSettings = (next: OmnibarSettings): string | null => {
+    if (!persistOmnibarSettings(next)) {
+      return 'Browser storage is full, blocked, or unavailable.';
+    }
+    setSearchSettingsOpen(false);
+    setStatusToast({ title: 'Search settings saved' });
+    return null;
+  };
+
+  const applyBookmarks = (
+    nextBookmarks: Bookmark[],
+    reportPageError = true,
+  ): boolean => {
     if (!persist(nextBookmarks, null)) {
-      setError(storageError('Couldn’t import bookmarks'));
-      return;
+      if (reportPageError) {
+        setError(storageError('Couldn’t import bookmarks'));
+      }
+      return false;
     }
     setSection('All');
     setQuery('');
-    setActiveBookmark(nextBookmarks[0] ?? null);
+    setSearchOpen(false);
+    setSelectionOverride(
+      nextBookmarks[0] ? { kind: 'bookmark', bookmark: nextBookmarks[0] } : null,
+    );
     setKeyboardSelection(false);
     setError(null);
+    return true;
   };
 
   const reorderSection = (
@@ -272,7 +556,7 @@ function App() {
       position,
     );
     if (persist(nextBookmarks, null)) {
-      setActiveBookmark(null);
+      setSelectionOverride(null);
       setKeyboardSelection(false);
       setError(null);
     } else {
@@ -292,7 +576,7 @@ function App() {
           detail: source.title,
           section,
           query,
-          activeBookmark,
+          activeBookmark: inspectedBookmark,
         }
       : null;
 
@@ -305,13 +589,13 @@ function App() {
       return;
     }
 
-    if (activeBookmark === source) {
+    if (effectiveTarget?.kind === 'bookmark' && effectiveTarget.bookmark === source) {
       if (crossSection) {
         const prevSet = new Set(bookmarks);
         const moved = nextBookmarks.find((entry) => !prevSet.has(entry)) ?? null;
-        setActiveBookmark(moved);
+        setSelectionOverride(moved ? { kind: 'bookmark', bookmark: moved } : null);
       } else {
-        setActiveBookmark(source);
+        setSelectionOverride({ kind: 'bookmark', bookmark: source });
       }
     }
     if (
@@ -428,7 +712,7 @@ function App() {
     allowFiles: boolean,
   ) => {
     if (contextMenu) setContextMenu(null);
-    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (bookmarkDialog || sectionDialog || editorOpen || searchSettingsOpen) return;
     const mode = detectDropMode(event.dataTransfer, allowFiles);
     if (!mode) return;
     event.preventDefault();
@@ -444,7 +728,7 @@ function App() {
     event: DragEvent<HTMLElement>,
     allowFiles: boolean,
   ) => {
-    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (bookmarkDialog || sectionDialog || editorOpen || searchSettingsOpen) return;
     if (Array.from(event.dataTransfer.types).includes(BOOKMARK_DRAG_TYPE)) {
       updateBookmarkDropTarget(null);
       updateBookmarkDropSection(null);
@@ -533,14 +817,16 @@ function App() {
       detail: bookmark.title,
       section,
       query,
-      activeBookmark,
+      activeBookmark: inspectedBookmark,
     })) {
       if (section !== 'All' && section !== targetSection) {
         setSection(targetSection);
       }
       setQuery('');
+      setSearchOpen(false);
+      searchRef.current?.blur();
       pendingScrollBookmarkRef.current = bookmark;
-      setActiveBookmark(bookmark);
+      setSelectionOverride({ kind: 'bookmark', bookmark });
       setKeyboardSelection(false);
       setError(null);
     } else {
@@ -552,7 +838,7 @@ function App() {
     event: DragEvent<HTMLElement>,
     allowFiles: boolean,
   ) => {
-    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (bookmarkDialog || sectionDialog || editorOpen || searchSettingsOpen) return;
 
     if (Array.from(event.dataTransfer.types).includes(BOOKMARK_DRAG_TYPE)) {
       event.preventDefault();
@@ -592,7 +878,12 @@ function App() {
     }
     setSection(restored.section);
     setQuery(restored.query);
-    setActiveBookmark(restored.activeBookmark);
+    setSearchOpen(Boolean(restored.query));
+    setSelectionOverride(
+      restored.activeBookmark
+        ? { kind: 'bookmark', bookmark: restored.activeBookmark }
+        : null,
+    );
     setKeyboardSelection(false);
     setError(null);
   };
@@ -607,6 +898,18 @@ function App() {
         && urlIdentity(bookmark.url) === bookmarkIdentity,
     );
     if (duplicate) return `“${duplicate.title}” already uses this URL.`;
+
+    const nextAlias = normalizeAlias(nextBookmark.alias ?? '');
+    if (nextAlias) {
+      const duplicateAlias = bookmarks.find(
+        (bookmark) =>
+          bookmark !== editingBookmark
+          && normalizeAlias(bookmark.alias ?? '') === nextAlias,
+      );
+      if (duplicateAlias) {
+        return `“${duplicateAlias.title}” already uses shortcut !${nextAlias}.`;
+      }
+    }
 
     let nextBookmarks: Bookmark[];
     if (editingBookmark) {
@@ -625,7 +928,9 @@ function App() {
     if (persist(nextBookmarks, null)) {
       setSection(nextBookmark.section);
       setQuery('');
-      setActiveBookmark(nextBookmark);
+      setSearchOpen(false);
+      searchRef.current?.blur();
+      setSelectionOverride({ kind: 'bookmark', bookmark: nextBookmark });
       setKeyboardSelection(false);
       setError(null);
       setBookmarkDialog(null);
@@ -648,10 +953,14 @@ function App() {
       detail: bookmarkToDelete.title,
       section,
       query,
-      activeBookmark,
+      activeBookmark: inspectedBookmark,
     })) {
       setSection(nextSection);
-      setActiveBookmark(null);
+      if (nextBookmarks.length === 0) {
+        setQuery('');
+        setSearchOpen(false);
+      }
+      setSelectionOverride(null);
       setKeyboardSelection(false);
       setError(null);
       setBookmarkDialog(null);
@@ -675,17 +984,25 @@ function App() {
       return `“${conflictingSection}” already exists.`;
     }
 
-    let nextActiveBookmark = activeBookmark;
+    const prevOverrideBookmark =
+      selectionOverride?.kind === 'bookmark' ? selectionOverride.bookmark : null;
+    let nextOverrideBookmark = prevOverrideBookmark;
     const nextBookmarks = bookmarks.map((bookmark) => {
       if (bookmark.section !== previousName) return bookmark;
       const renamed = { ...bookmark, section: nextName };
-      if (bookmark === activeBookmark) nextActiveBookmark = renamed;
+      if (bookmark === prevOverrideBookmark) nextOverrideBookmark = renamed;
       return renamed;
     });
 
     if (persist(nextBookmarks, null)) {
       if (section === previousName) setSection(nextName);
-      setActiveBookmark(nextActiveBookmark);
+      if (selectionOverride?.kind === 'bookmark') {
+        setSelectionOverride(
+          nextOverrideBookmark
+            ? { kind: 'bookmark', bookmark: nextOverrideBookmark }
+            : null,
+        );
+      }
       setKeyboardSelection(false);
       setError(null);
       setSectionDialog(null);
@@ -705,17 +1022,19 @@ function App() {
     }
 
     const affectedCount = sectionCounts.get(sectionToDelete) ?? 0;
-    let nextActiveBookmark = activeBookmark;
+    const prevOverrideBookmark =
+      selectionOverride?.kind === 'bookmark' ? selectionOverride.bookmark : null;
+    let nextOverrideBookmark = prevOverrideBookmark;
     const nextBookmarks = strategy === 'move'
       ? bookmarks.map((bookmark) => {
         if (bookmark.section !== sectionToDelete) return bookmark;
         const moved = { ...bookmark, section: destination! };
-        if (bookmark === activeBookmark) nextActiveBookmark = moved;
+        if (bookmark === prevOverrideBookmark) nextOverrideBookmark = moved;
         return moved;
       })
       : bookmarks.filter((bookmark) => {
         if (bookmark.section !== sectionToDelete) return true;
-        if (bookmark === activeBookmark) nextActiveBookmark = null;
+        if (bookmark === prevOverrideBookmark) nextOverrideBookmark = null;
         return false;
       });
 
@@ -726,12 +1045,22 @@ function App() {
         : `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} removed from ${sectionToDelete}.`,
       section,
       query,
-      activeBookmark,
+      activeBookmark: inspectedBookmark,
     })) {
       if (section === sectionToDelete) {
         setSection(strategy === 'move' ? destination! : 'All');
       }
-      setActiveBookmark(nextActiveBookmark);
+      if (nextBookmarks.length === 0) {
+        setQuery('');
+        setSearchOpen(false);
+        setSelectionOverride(null);
+      } else if (selectionOverride?.kind === 'bookmark') {
+        setSelectionOverride(
+          nextOverrideBookmark
+            ? { kind: 'bookmark', bookmark: nextOverrideBookmark }
+            : null,
+        );
+      }
       setKeyboardSelection(false);
       setError(null);
       setSectionDialog(null);
@@ -773,7 +1102,7 @@ function App() {
     contextMenuIdRef.current += 1;
     if (target.kind === 'bookmark') {
       setKeyboardSelection(openedBy === 'keyboard');
-      setActiveBookmark(target.bookmark);
+      setSelectionOverride({ kind: 'bookmark', bookmark: target.bookmark });
     }
     setContextMenu({
       id: contextMenuIdRef.current,
@@ -798,7 +1127,7 @@ function App() {
     event: ReactMouseEvent<HTMLElement>,
     target: ContextMenuTarget,
   ) => {
-    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (bookmarkDialog || sectionDialog || editorOpen || searchSettingsOpen) return;
     event.preventDefault();
     event.stopPropagation();
     const isKeyboardCoords = event.clientX === 0 && event.clientY === 0;
@@ -818,7 +1147,7 @@ function App() {
     event: ReactKeyboardEvent<HTMLElement>,
     target: ContextMenuTarget,
   ) => {
-    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (bookmarkDialog || sectionDialog || editorOpen || searchSettingsOpen) return;
     if (
       event.key === 'ContextMenu'
       || (event.key === 'F10' && event.shiftKey)
@@ -923,13 +1252,12 @@ function App() {
       return;
     }
 
-    try {
-      applyBookmarks(nextBookmarks);
-      closeEditor();
-      setEditorError(null);
-    } catch {
+    if (!applyBookmarks(nextBookmarks, false)) {
       setEditorError(storageError('Couldn’t save changes'));
+      return;
     }
+    closeEditor();
+    setEditorError(null);
   };
 
   if (!bookmarks.length) {
@@ -998,6 +1326,94 @@ function App() {
               <span className="app-load-arrow" aria-hidden="true">＋</span>
             </button>
           </div>
+
+          <div
+            className={`app-empty-omnibar-region${dropActive ? ' is-transparent' : ''}`}
+            aria-hidden={dropActive}
+            style={{ transitionDuration: `${TYPEWRITER_DURATION}ms` }}
+          >
+            <div className="app-empty-omnibar-bar">
+              {searchOpen || Boolean(query) ? (
+                <label className="app-empty-search">
+                  <span aria-hidden="true">/</span>
+                  <input
+                    ref={searchRef}
+                    autoFocus={searchOpen}
+                    tabIndex={dropActive ? -1 : undefined}
+                    value={query}
+                    onFocus={() => setSearchOpen(true)}
+                    onBlur={(event) => {
+                      const region = event.currentTarget.closest('.app-empty-omnibar-region');
+                      if (!query && !region?.contains(event.relatedTarget as Node | null)) {
+                        setSearchOpen(false);
+                      }
+                    }}
+                    onChange={(event) => {
+                      setQuery(event.target.value);
+                      setSelectionOverride(null);
+                      setKeyboardSelection(true);
+                    }}
+                    onKeyDown={handleEmptyOmnibarKeyDown}
+                    placeholder="Search web, !bangs, or type a URL…"
+                    aria-label="Search web, !bangs, or URL"
+                  />
+                </label>
+              ) : (
+                <button
+                  type="button"
+                  className="app-empty-search-trigger"
+                  tabIndex={dropActive ? -1 : undefined}
+                  onClick={() => {
+                    setSearchOpen(true);
+                    window.requestAnimationFrame(() => searchRef.current?.focus());
+                  }}
+                >
+                  <span aria-hidden="true">/</span>
+                  <span>Search web, !bangs, or URL</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className="app-empty-settings-button"
+                tabIndex={dropActive ? -1 : undefined}
+                onClick={() => {
+                  if (!query) setSearchOpen(false);
+                  setSearchSettingsOpen(true);
+                }}
+              >
+                Search settings
+              </button>
+            </div>
+
+            {omnibarAction && (
+              <div className="app-empty-omnibar-result">
+                <a
+                  href={omnibarAction.url}
+                  draggable={false}
+                  onDragStart={(event) => event.preventDefault()}
+                  tabIndex={dropActive ? -1 : undefined}
+                  className="app-omnibar-action is-current is-keyboard-current"
+                >
+                  {omnibarAction.iconUrl ? (
+                    <img src={omnibarAction.iconUrl} alt="" draggable={false} />
+                  ) : (
+                    <span className="app-omnibar-glyph" aria-hidden="true">
+                      {getOmnibarGlyph(omnibarAction)}
+                    </span>
+                  )}
+                  <span className="app-bookmark-copy">
+                    <strong>{omnibarAction.title}</strong>
+                    <small>{omnibarAction.subtitle}</small>
+                  </span>
+                  <span className="app-bookmark-tail">
+                    <code className="app-omnibar-badge">{omnibarAction.badge}</code>
+                    <b aria-hidden="true">↗</b>
+                  </span>
+                </a>
+              </div>
+            )}
+          </div>
+
           {error && (
             <ErrorNotice
               error={error}
@@ -1012,6 +1428,14 @@ function App() {
             sections={[]}
             onCancel={() => setBookmarkDialog(null)}
             onSave={saveBookmark}
+          />
+        )}
+        {searchSettingsOpen && (
+          <SearchSettingsDialog
+            settings={omnibarSettings}
+            bookmarks={bookmarks}
+            onCancel={() => setSearchSettingsOpen(false)}
+            onSave={saveOmnibarSettings}
           />
         )}
         {(undoState || statusToast) && (
@@ -1034,6 +1458,18 @@ function App() {
   const activeUrlDropSection = dropMode === 'url'
     ? resolveDropSection(urlDropSection, section)
     : null;
+  const isSearchExpanded = searchOpen || Boolean(query);
+  const inspectedAlias = inspectedBookmark
+    ? normalizeAlias(inspectedBookmark.alias ?? '')
+    : '';
+  const inspectedHasSiteSearch = Boolean(
+    inspectedBookmark
+    && inspectedAlias
+    && normalizeSearchUrl(inspectedBookmark.searchUrl ?? ''),
+  );
+  const inspectedIconSrc = inspectedBookmark
+    ? resolveBookmarkIconSrc(inspectedBookmark, 128)
+    : undefined;
 
   return (
     <div
@@ -1059,7 +1495,7 @@ function App() {
             aria-pressed={section === 'All'}
             onClick={() => {
               setSection('All');
-              setActiveBookmark(null);
+              setSelectionOverride(null);
               setKeyboardSelection(false);
             }}
           >
@@ -1136,7 +1572,7 @@ function App() {
                 handleElementContextKeyDown(event, { kind: 'section', section: name })}
               onClick={() => {
                 setSection(name);
-                setActiveBookmark(null);
+                setSelectionOverride(null);
                 setKeyboardSelection(false);
               }}
             >
@@ -1188,6 +1624,9 @@ function App() {
           <button type="button" onClick={openEditor}>
             Edit JSON
           </button>
+          <button type="button" onClick={() => setSearchSettingsOpen(true)}>
+            Search
+          </button>
         </div>
 
       </aside>
@@ -1199,18 +1638,21 @@ function App() {
             <h1>{section === 'All' ? 'Everything' : section}</h1>
           </div>
           <div className="app-header-tools">
-            {inspected && (
+            {inspectedBookmark && (
               <div className="app-compact-bookmark-actions">
                 <button
                   type="button"
                   onClick={() => setBookmarkDialog({
                     mode: 'edit',
-                    bookmark: inspected,
+                    bookmark: inspectedBookmark,
                   })}
                 >
                   Edit
                 </button>
-                <button type="button" onClick={() => deleteBookmark(inspected)}>
+                <button
+                  type="button"
+                  onClick={() => deleteBookmark(inspectedBookmark)}
+                >
                   Delete
                 </button>
               </div>
@@ -1228,11 +1670,11 @@ function App() {
               <span className="app-add-label" aria-hidden="true">Add</span>
               <span className="app-add-symbol" aria-hidden="true">+</span>
             </button>
-            <div className={`app-search-wrap${searchOpen ? ' is-open' : ''}`}>
+            <div className={`app-search-wrap${isSearchExpanded ? ' is-open' : ''}`}>
               <button
                 type="button"
                 className="app-search-trigger"
-                aria-label={searchOpen ? 'Focus search' : 'Open search'}
+                aria-label={isSearchExpanded ? 'Focus search' : 'Open search'}
                 title="Search (/)"
                 onClick={() => {
                   setSearchOpen(true);
@@ -1248,37 +1690,24 @@ function App() {
                 <input
                   ref={searchRef}
                   value={query}
-                  onBlur={() => {
-                    if (!query) setSearchOpen(false);
+                  onFocus={() => setSearchOpen(true)}
+                  onBlur={(event) => {
+                    if (
+                      !event.currentTarget
+                        .closest('.app-search-wrap')
+                        ?.contains(event.relatedTarget as Node | null)
+                    ) {
+                      setSearchOpen(false);
+                    }
                   }}
                   onChange={(event) => {
                     setQuery(event.target.value);
-                    setActiveBookmark(null);
+                    setSelectionOverride(null);
                     setKeyboardSelection(true);
                   }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'ArrowDown') {
-                      event.preventDefault();
-                      selectRelativeBookmark(1);
-                    } else if (event.key === 'ArrowUp') {
-                      event.preventDefault();
-                      selectRelativeBookmark(-1);
-                    } else if (event.key === 'Enter' && inspected) {
-                      event.preventDefault();
-                      const destination = normalizeUrl(inspected.url);
-                      if (event.ctrlKey || event.metaKey) {
-                        window.open(destination, '_blank', 'noopener,noreferrer');
-                      } else {
-                        window.location.assign(destination);
-                      }
-                    } else if (event.key === 'Escape') {
-                      setQuery('');
-                      setSearchOpen(false);
-                      searchRef.current?.blur();
-                    }
-                  }}
-                  placeholder="Find anything…"
-                  aria-label="Search bookmarks"
+                  onKeyDown={handleOmnibarKeyDown}
+                  placeholder="Find, !bang, or URL…"
+                  aria-label="Search bookmarks, !bangs, or URL"
                 />
                 <small>{matches.length}</small>
               </label>
@@ -1287,6 +1716,46 @@ function App() {
         </header>
 
         <div key={section} className="app-directory">
+          {omnibarAction && (
+            <div className="app-omnibar-bar">
+              <a
+                href={omnibarAction.url}
+                data-omnibar-action="true"
+                draggable={false}
+                onDragStart={(event) => event.preventDefault()}
+                className={`app-omnibar-action${
+                  effectiveTarget?.kind === 'omnibar'
+                    ? ` is-current${keyboardSelection ? ' is-keyboard-current' : ''}`
+                    : ''
+                }`}
+                onMouseEnter={() => {
+                  setKeyboardSelection(false);
+                  setSelectionOverride({ kind: 'omnibar' });
+                }}
+                onFocus={() => {
+                  setKeyboardSelection(true);
+                  setSelectionOverride({ kind: 'omnibar' });
+                }}
+              >
+                {omnibarAction.iconUrl ? (
+                  <img src={omnibarAction.iconUrl} alt="" draggable={false} />
+                ) : (
+                  <span className="app-omnibar-glyph" aria-hidden="true">
+                    {getOmnibarGlyph(omnibarAction)}
+                  </span>
+                )}
+                <span className="app-bookmark-copy">
+                  <strong>{omnibarAction.title}</strong>
+                  <small>{omnibarAction.subtitle}</small>
+                </span>
+                <span className="app-bookmark-tail">
+                  <code className="app-omnibar-badge">{omnibarAction.badge}</code>
+                  <b aria-hidden="true">↗</b>
+                </span>
+              </a>
+            </div>
+          )}
+
           {[...groupedMatches].map(([sectionName, items]) => {
             const seenKeys = new Map<string, number>();
             return (
@@ -1331,6 +1800,11 @@ function App() {
                     const dropClass = bookmarkDropTarget?.bookmark === bookmark
                       ? ` is-drop-${bookmarkDropTarget.position}`
                       : '';
+                    const isCurrentBookmark =
+                      effectiveTarget?.kind === 'bookmark'
+                      && effectiveTarget.bookmark === bookmark;
+                    const iconSrc = resolveBookmarkIconSrc(bookmark, 64);
+                    const bookmarkAlias = normalizeAlias(bookmark.alias ?? '');
                     return (
                       <a
                         key={key}
@@ -1338,7 +1812,7 @@ function App() {
                         href={normalizeUrl(bookmark.url)}
                         data-app-bookmark-index={bookmarkIndex}
                         className={`app-bookmark${
-                          bookmark === inspected
+                          isCurrentBookmark
                             ? ` is-current${keyboardSelection ? ' is-keyboard-current' : ''}`
                             : ''
                         }${
@@ -1346,11 +1820,11 @@ function App() {
                         }${dropClass}`}
                         onMouseEnter={() => {
                           setKeyboardSelection(false);
-                          setActiveBookmark(bookmark);
+                          setSelectionOverride({ kind: 'bookmark', bookmark });
                         }}
                         onFocus={() => {
                           setKeyboardSelection(true);
-                          setActiveBookmark(bookmark);
+                          setSelectionOverride({ kind: 'bookmark', bookmark });
                         }}
                         onDragStart={(event) => {
                           if (contextMenu) setContextMenu(null);
@@ -1398,11 +1872,13 @@ function App() {
                             bookmark,
                           })}
                       >
-                        <img
-                          src={bookmark.iconUrl || getFaviconUrl(bookmark.url, 64)}
-                          alt=""
-                          draggable={false}
-                        />
+                        {iconSrc ? (
+                          <img src={iconSrc} alt="" draggable={false} />
+                        ) : (
+                          <span className="app-bookmark-monogram" aria-hidden="true">
+                            {getBookmarkMonogram(bookmark)}
+                          </span>
+                        )}
                         <span className="app-bookmark-copy">
                           <strong>{bookmark.title}</strong>
                           <small>
@@ -1410,6 +1886,9 @@ function App() {
                           </small>
                         </span>
                         <span className="app-bookmark-tail">
+                          {bookmarkAlias && (
+                            <code className="app-alias-badge">!{bookmarkAlias}</code>
+                          )}
                           {bookmark.tier && (
                             <em
                               className="app-tier"
@@ -1429,71 +1908,128 @@ function App() {
           })}
 
           {!matches.length && (
-            <div className="app-no-results">
-              <span>00</span>
-              <h2>No destination found.</h2>
-              <button onClick={() => { setQuery(''); setSection('All'); }}>
-                Reset search
-              </button>
-            </div>
+            query.trim() !== '' ? (
+              <div className="app-omnibar-empty-matches">
+                <span>
+                  {section === 'All'
+                    ? `No saved bookmarks match “${query.trim()}”.`
+                    : `No saved bookmarks match in ${section}.`}
+                </span>
+                <div className="app-omnibar-empty-actions">
+                  {section !== 'All' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSection('All');
+                        setSelectionOverride(null);
+                      }}
+                    >
+                      Show Everything
+                    </button>
+                  )}
+                  <button type="button" onClick={clearSearch}>
+                    Clear search
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="app-no-results">
+                <span>00</span>
+                <h2>No destination found.</h2>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSection('All');
+                    clearSearch();
+                  }}
+                >
+                  Reset search
+                </button>
+              </div>
+            )
           )}
         </div>
       </main>
 
       <aside className="app-inspector" aria-live="polite">
-        {inspected && (
+        {inspectedBookmark ? (
           <div
-            key={inspected.url}
+            key={inspectedBookmark.url}
             className={`app-inspector-inner${keyboardSelection ? ' is-instant' : ''}`}
           >
             <p className="app-kicker">In focus</p>
-            <img
-              src={inspected.iconUrl || getFaviconUrl(inspected.url, 128)}
-              alt=""
-              className="app-inspector-icon"
-            />
-            <h2>{inspected.title}</h2>
+            {inspectedIconSrc ? (
+              <img
+                src={inspectedIconSrc}
+                alt=""
+                className="app-inspector-icon"
+              />
+            ) : (
+              <div className="app-inspector-monogram" aria-hidden="true">
+                {getBookmarkMonogram(inspectedBookmark)}
+              </div>
+            )}
+            <h2>{inspectedBookmark.title}</h2>
             <p className="app-inspector-location">
-              {inspected.section}
-              {inspected.subsection ? ` / ${inspected.subsection}` : ''}
+              {inspectedBookmark.section}
+              {inspectedBookmark.subsection ? ` / ${inspectedBookmark.subsection}` : ''}
             </p>
-            <p className="app-inspector-url">{new URL(normalizeUrl(inspected.url)).hostname}</p>
-            {(inspected.description || inspected.product) && (
+            <p className="app-inspector-url">{safeHostname(inspectedBookmark.url)}</p>
+            {(inspectedBookmark.description || inspectedBookmark.product) && (
               <p className="app-inspector-description">
-                {inspected.description || inspected.product}
+                {inspectedBookmark.description || inspectedBookmark.product}
               </p>
             )}
             <dl>
-              {inspected.subsection && (
+              {inspectedBookmark.subsection && (
                 <div className="app-meta-row">
-                  <dt>Group</dt><dd>{inspected.subsection}</dd>
+                  <dt>Group</dt><dd>{inspectedBookmark.subsection}</dd>
                 </div>
               )}
-              {inspected.tier && (
+              {inspectedAlias && (
+                <div className="app-meta-row">
+                  <dt>Shortcut</dt><dd><code>!{inspectedAlias}</code></dd>
+                </div>
+              )}
+              {inspectedBookmark.searchUrl && (
+                <div className="app-meta-row">
+                  <dt>Search</dt>
+                  <dd className="app-meta-code">{inspectedBookmark.searchUrl}</dd>
+                </div>
+              )}
+              {inspectedBookmark.tier && (
                 <div className="app-meta-row">
                   <dt>Tier</dt>
                   <dd>
                     <span
                       className="app-tier"
-                      data-tier={tierRank(inspected.tier)}
+                      data-tier={tierRank(inspectedBookmark.tier)}
                     >
-                      {inspected.tier}
+                      {inspectedBookmark.tier}
                     </span>
                   </dd>
                 </div>
               )}
-              <MetaList label="Category" values={inspected.categories} />
-              <MetaList label="Does" values={inspected.capabilities} />
-              <MetaList label="Format" values={inspected.formats} />
-              <MetaList label="Good" values={inspected.pros} />
-              <MetaList label="Watch" values={inspected.cons} />
+              <MetaList label="Category" values={inspectedBookmark.categories} />
+              <MetaList label="Does" values={inspectedBookmark.capabilities} />
+              <MetaList label="Format" values={inspectedBookmark.formats} />
+              <MetaList label="Good" values={inspectedBookmark.pros} />
+              <MetaList label="Watch" values={inspectedBookmark.cons} />
             </dl>
             <div className="app-inspector-actions">
+              {inspectedHasSiteSearch && (
+                <button
+                  type="button"
+                  onClick={() => activateBookmarkSiteSearch(inspectedBookmark)}
+                >
+                  Search site
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setBookmarkDialog({
                   mode: 'edit',
-                  bookmark: inspected,
+                  bookmark: inspectedBookmark,
                 })}
               >
                 Edit
@@ -1501,16 +2037,66 @@ function App() {
               <button
                 type="button"
                 className="is-danger"
-                onClick={() => deleteBookmark(inspected)}
+                onClick={() => deleteBookmark(inspectedBookmark)}
               >
                 Delete
               </button>
             </div>
-            <a href={normalizeUrl(inspected.url)} className="app-open-link">
+            <a
+              href={normalizeUrl(inspectedBookmark.url)}
+              className="app-open-link"
+              draggable={false}
+              onDragStart={(event) => event.preventDefault()}
+            >
               Open destination <span>↗</span>
             </a>
           </div>
-        )}
+        ) : effectiveTarget?.kind === 'omnibar' ? (
+          <div
+            key={effectiveTarget.action.url}
+            className={`app-inspector-inner${keyboardSelection ? ' is-instant' : ''}`}
+          >
+            <p className="app-kicker">Omnibar destination</p>
+            <div className="app-inspector-monogram" aria-hidden="true">
+              {getOmnibarGlyph(effectiveTarget.action)}
+            </div>
+            <h2>{effectiveTarget.action.title}</h2>
+            <p className="app-inspector-location">
+              {omnibarKindLabel(effectiveTarget.action.kind)}
+            </p>
+            <p className="app-inspector-url">
+              {safeHostname(effectiveTarget.action.url)}
+            </p>
+            <dl>
+              <div className="app-meta-row">
+                <dt>Trigger</dt>
+                <dd><code>{effectiveTarget.action.badge}</code></dd>
+              </div>
+              <div className="app-meta-row">
+                <dt>Enter</dt>
+                <dd>Open destination</dd>
+              </div>
+              <div className="app-meta-row">
+                <dt>Shift+Enter</dt>
+                <dd>Search {getActiveSearchEngine(omnibarSettings).label}</dd>
+              </div>
+              {effectiveTarget.action.tabCompletion && (
+                <div className="app-meta-row">
+                  <dt>Tab</dt>
+                  <dd>Complete {effectiveTarget.action.tabCompletion.trim()}</dd>
+                </div>
+              )}
+            </dl>
+            <a
+              href={effectiveTarget.action.url}
+              className="app-open-link"
+              draggable={false}
+              onDragStart={(event) => event.preventDefault()}
+            >
+              Open destination <span>↗</span>
+            </a>
+          </div>
+        ) : null}
       </aside>
 
       {dropMode === 'url' && (
@@ -1551,6 +2137,10 @@ function App() {
           onOpenNewTab={(bookmark) => {
             closeContextMenu(contextMenu.openedBy === 'keyboard');
             window.open(normalizeUrl(bookmark.url), '_blank', 'noopener,noreferrer');
+          }}
+          onSearchSite={(bookmark) => {
+            closeContextMenu(false);
+            activateBookmarkSiteSearch(bookmark);
           }}
           onCopyUrl={(bookmark) => {
             closeContextMenu(contextMenu.openedBy === 'keyboard');
@@ -1608,6 +2198,15 @@ function App() {
           onCancel={() => setSectionDialog(null)}
           onRename={renameSection}
           onDelete={deleteSection}
+        />
+      )}
+
+      {searchSettingsOpen && (
+        <SearchSettingsDialog
+          settings={omnibarSettings}
+          bookmarks={bookmarks}
+          onCancel={() => setSearchSettingsOpen(false)}
+          onSave={saveOmnibarSettings}
         />
       )}
 

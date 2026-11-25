@@ -165,7 +165,8 @@ html.app-route-root::-webkit-scrollbar {
 }
 
 .app-section-nav button > *,
-.app-bookmark > * {
+.app-bookmark > *,
+.app-omnibar-action > * {
     pointer-events: none;
 }
 
@@ -253,7 +254,9 @@ html.app-route-root::-webkit-scrollbar {
 
 .app-data-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.8rem;
+    row-gap: 0.45rem;
     margin: 0.8rem 0.45rem 0;
     padding-top: 0.8rem;
     border-top: 1px solid var(--line);
@@ -593,6 +596,171 @@ html.app-route-root::-webkit-scrollbar {
     animation: app-directory-in 240ms var(--ease-enter) both;
 }
 
+.app-omnibar-bar {
+    margin-bottom: 2rem;
+    border-bottom: 1px solid var(--directory-line);
+}
+
+.app-omnibar-action {
+    position: relative;
+    display: grid;
+    grid-template-columns: 2.4rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.8rem;
+    min-height: 4rem;
+    padding: 0.55rem 0.65rem;
+    border-top: 1px solid var(--directory-line);
+    color: var(--ink);
+    text-decoration: none;
+    transform-origin: center;
+    transition:
+        color 150ms var(--ease-state),
+        background-color 150ms var(--ease-state),
+        box-shadow 180ms var(--ease-state);
+}
+
+.app-omnibar-action:hover,
+.app-omnibar-action:focus-visible,
+.app-omnibar-action.is-current {
+    outline: none;
+}
+
+.app-omnibar-action:hover,
+.app-omnibar-action:focus-visible {
+    background: oklch(0.2 0.01 75 / 0.45);
+}
+
+.app-omnibar-action.is-current {
+    background: oklch(0.22 0.012 75 / 0.62);
+    -webkit-backdrop-filter: blur(14px) saturate(112%);
+    backdrop-filter: blur(14px) saturate(112%);
+    box-shadow:
+        inset 0 0 0 1px oklch(0.52 0.035 76 / 0.34),
+        0 10px 26px oklch(0.06 0.008 75 / 0.18);
+}
+
+.app-omnibar-action:hover {
+    box-shadow: none;
+}
+
+.app-omnibar-action.is-keyboard-current {
+    transition-duration: 0ms;
+}
+
+.app-omnibar-action.is-keyboard-current img,
+.app-omnibar-action.is-keyboard-current .app-bookmark-tail b {
+    transition-duration: 0ms;
+}
+
+.app-omnibar-action img {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.35rem;
+    object-fit: contain;
+    background: oklch(0.93 0.008 75);
+    box-shadow: 0 4px 12px oklch(0.08 0.01 75 / 0.2);
+    transition: box-shadow 180ms var(--ease-state);
+}
+
+.app-omnibar-action:hover img,
+.app-omnibar-action.is-current img {
+    box-shadow: 0 7px 18px oklch(0.08 0.01 75 / 0.28);
+}
+
+.app-omnibar-action.is-current .app-bookmark-tail b {
+    color: var(--accent);
+    opacity: 0.9;
+}
+
+.app-omnibar-glyph,
+.app-bookmark-monogram {
+    display: grid;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.35rem;
+    place-items: center;
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.app-omnibar-glyph {
+    border: 1px solid color-mix(in oklch, var(--accent) 42%, var(--line-strong));
+    color: var(--accent);
+    background: oklch(0.14 0.009 75 / 0.86);
+}
+
+.app-bookmark-monogram {
+    border: 1px solid var(--line-strong);
+    color: var(--muted);
+    background: var(--panel-raised);
+}
+
+.app-omnibar-badge {
+    max-width: 9rem;
+    overflow: hidden;
+    padding: 0.15rem 0.42rem;
+    border: 1px solid color-mix(in oklch, var(--accent) 36%, var(--line));
+    border-radius: 0.25rem;
+    color: var(--accent);
+    background: oklch(0.16 0.012 75 / 0.78);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.58rem;
+    font-weight: 650;
+    letter-spacing: 0.04em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-alias-badge {
+    max-width: 7.5rem;
+    overflow: hidden;
+    padding: 0.14rem 0.38rem;
+    border: 1px solid color-mix(in oklch, var(--accent) 32%, var(--line));
+    border-radius: 0.25rem;
+    color: var(--accent);
+    background: oklch(0.16 0.012 75 / 0.72);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.58rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-omnibar-empty-matches {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.35rem 0.65rem 1.5rem;
+    color: var(--quiet);
+    font-size: 0.75rem;
+}
+
+.app-omnibar-empty-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex: 0 0 auto;
+}
+
+.app-omnibar-empty-actions button {
+    padding: 0 0 0.15rem;
+    border: 0;
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.72rem;
+    transition: color 150ms var(--ease-state), border-color 150ms var(--ease-state);
+}
+
+.app-omnibar-empty-actions button:hover,
+.app-omnibar-empty-actions button:focus-visible {
+    border-color: var(--accent);
+    color: var(--ink);
+}
+
 .app-group {
     transition: background-color 160ms var(--ease-state), box-shadow 160ms var(--ease-state);
 }
@@ -842,6 +1010,22 @@ html.app-route-root::-webkit-scrollbar {
     animation: app-inspector-item-in 420ms 65ms var(--ease-enter) backwards;
 }
 
+.app-inspector-monogram {
+    display: grid;
+    width: 3.25rem;
+    height: 3.25rem;
+    margin: 2.5rem 0 1.1rem;
+    border: 1px solid color-mix(in oklch, var(--accent) 45%, var(--line-strong));
+    border-radius: 0.55rem;
+    color: var(--accent);
+    background: oklch(0.14 0.009 75 / 0.9);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 1.15rem;
+    font-weight: 700;
+    place-items: center;
+    animation: app-inspector-item-in 420ms 65ms var(--ease-enter) backwards;
+}
+
 .app-inspector h2 {
     margin: 0;
     font-family: Georgia, "Times New Roman", serif;
@@ -929,6 +1113,20 @@ html.app-route-root::-webkit-scrollbar {
 .app-meta-row dd {
     margin: 0;
     color: var(--muted);
+}
+
+.app-meta-row dd code {
+    color: var(--accent);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.68rem;
+}
+
+.app-meta-code {
+    min-width: 0;
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.65rem;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .app-inspector-actions {
@@ -1257,9 +1455,11 @@ html.app-route-root::-webkit-scrollbar {
 }
 
 .app-context-menu-item > small {
+    flex-shrink: 0;
     color: var(--quiet);
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
     font-size: 0.72rem;
+    white-space: nowrap;
 }
 
 .app-context-menu-item:hover,
@@ -1318,6 +1518,129 @@ html.app-route-root::-webkit-scrollbar {
 
 .app-section-dialog {
     width: min(32rem, 100%);
+}
+
+.app-search-settings-dialog {
+    width: min(50rem, 100%);
+}
+
+.app-bang-section {
+    margin-top: 1.5rem;
+    padding-top: 1.15rem;
+    border-top: 1px solid var(--line);
+}
+
+.app-bang-section-header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.9rem;
+}
+
+.app-bang-section-label {
+    display: block;
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.58rem;
+    font-weight: 650;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+}
+
+.app-bang-section-hint {
+    margin: 0.3rem 0 0;
+    color: var(--quiet);
+    font-size: 0.65rem;
+}
+
+.app-bang-section-hint code {
+    color: var(--muted);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+.app-bang-add-button,
+.app-bang-remove-button {
+    padding: 0.25rem 0 0.3rem;
+    border: 0;
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.68rem;
+    white-space: nowrap;
+    transition: color 150ms var(--ease-state), border-color 150ms var(--ease-state);
+}
+
+.app-bang-add-button:hover,
+.app-bang-add-button:focus-visible {
+    border-color: var(--accent);
+    color: var(--ink);
+}
+
+.app-bang-remove-button:hover,
+.app-bang-remove-button:focus-visible {
+    border-color: var(--danger);
+    color: color-mix(in oklch, var(--danger) 58%, var(--ink));
+}
+
+.app-bang-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+}
+
+.app-bang-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.app-bang-row {
+    display: grid;
+    grid-template-columns: 7.5rem minmax(8rem, 1fr) minmax(12rem, 1.6fr) auto;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.app-bang-shadow-note {
+    margin: 0;
+    color: color-mix(in oklch, var(--accent) 72%, var(--muted));
+    font-size: 0.64rem;
+    line-height: 1.4;
+}
+
+.app-builtin-bangs {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr));
+    gap: 0.45rem 0.9rem;
+}
+
+.app-builtin-bang-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.45rem;
+    padding: 0.3rem 0;
+    border-bottom: 1px solid color-mix(in oklch, var(--line) 55%, transparent);
+    font-size: 0.7rem;
+}
+
+.app-builtin-bang-row code {
+    color: var(--accent);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.66rem;
+}
+
+.app-builtin-bang-row span {
+    color: var(--muted);
+}
+
+.app-builtin-bang-row small {
+    width: 100%;
+    color: var(--quiet);
+    font-size: 0.62rem;
 }
 
 .app-form-dialog form {
@@ -1715,6 +2038,116 @@ html.app-route-root::-webkit-scrollbar {
     pointer-events: none;
 }
 
+.app-empty-omnibar-region {
+    margin-top: 1.5rem;
+    padding-top: 1.15rem;
+    border-top: 1px solid var(--directory-line);
+    transition-property: opacity;
+    transition-timing-function: var(--ease-state);
+    animation: app-empty-item-in 560ms 290ms var(--ease-enter) backwards;
+}
+
+.app-empty-omnibar-region.is-transparent {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.app-empty-omnibar-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 2.35rem;
+}
+
+.app-empty-search {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    align-items: center;
+    gap: 0.55rem;
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid var(--directory-line);
+    transition: border-color 180ms var(--ease-state);
+}
+
+.app-empty-search:focus-within {
+    border-color: var(--accent);
+}
+
+.app-empty-search span {
+    color: var(--accent);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.72rem;
+}
+
+.app-empty-search input {
+    width: 100%;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    color: var(--ink);
+    background: transparent;
+    font: inherit;
+    font-size: 0.82rem;
+}
+
+.app-empty-search input::placeholder {
+    color: var(--quiet);
+}
+
+.app-empty-search-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.2rem 0 0.3rem;
+    border: 0;
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.78rem;
+    transition: color 150ms var(--ease-state), border-color 150ms var(--ease-state);
+}
+
+.app-empty-search-trigger span:first-child {
+    color: var(--accent);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.72rem;
+}
+
+.app-empty-search-trigger:hover,
+.app-empty-search-trigger:focus-visible {
+    border-color: var(--accent);
+    color: var(--ink);
+}
+
+.app-empty-settings-button {
+    padding: 0.2rem 0 0.25rem;
+    border: 0;
+    border-bottom: 1px solid transparent;
+    color: var(--quiet);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.66rem;
+    white-space: nowrap;
+    transition: color 150ms var(--ease-state), border-color 150ms var(--ease-state);
+}
+
+.app-empty-settings-button:hover,
+.app-empty-settings-button:focus-visible {
+    border-color: var(--muted);
+    color: var(--muted);
+}
+
+.app-empty-omnibar-result {
+    margin-top: 0.85rem;
+    border-bottom: 1px solid var(--directory-line);
+}
+
 .app-empty-panel > .app-file-error {
     width: min(100%, 32rem);
     margin-top: 1.35rem;
@@ -1974,8 +2407,23 @@ html.app-route-root::-webkit-scrollbar {
         padding-top: 1.5rem;
     }
 
-    .app-bookmark-tail .app-tier {
+    .app-bookmark-tail .app-tier,
+    .app-bookmark-tail .app-alias-badge {
         display: none;
+    }
+
+    .app-omnibar-empty-matches {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.5rem;
+    }
+
+    .app-bang-row {
+        grid-template-columns: 1fr;
+    }
+
+    .app-empty-omnibar-bar {
+        flex-wrap: wrap;
     }
 
     .app-empty h1 {

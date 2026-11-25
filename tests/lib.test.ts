@@ -1,6 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeUrl, urlIdentity } from '../src/lib.ts';
+import {
+    buildSearchUrl,
+    encodeSearchQuery,
+    getFaviconUrl,
+    isBareHostWithPort,
+    isLocalOrPrivateHost,
+    isPublicSearchableHost,
+    normalizeAlias,
+    normalizeSearchUrl,
+    normalizeUrl,
+    safeHostname,
+    urlIdentity,
+} from '../src/lib.ts';
 import {
     BACKUP_KEY,
     STORAGE_KEY,
@@ -42,11 +54,218 @@ function makeDropData(
     };
 }
 
-test('normalizes shorthand domains and rejects unsafe schemes', () => {
+test('normalizes shorthand domains, local/private hosts, and rejects unsafe or malformed URLs', () => {
+    // Public HTTPS defaults
     assert.equal(normalizeUrl('example.com/path'), 'https://example.com/path');
+    assert.equal(normalizeUrl('example.com:8443/app'), 'https://example.com:8443/app');
     assert.equal(normalizeUrl('https://example.com'), 'https://example.com/');
-    assert.equal(normalizeUrl('javascript://alert(1)'), '');
-    assert.equal(normalizeUrl('mailto:user@example.com'), '');
+
+    // Local/private HTTP defaults
+    assert.equal(normalizeUrl('localhost:5173/api'), 'http://localhost:5173/api');
+    assert.equal(normalizeUrl('sub.localhost:3000'), 'http://sub.localhost:3000/');
+    assert.equal(normalizeUrl('nas.local/ui'), 'http://nas.local/ui');
+    assert.equal(normalizeUrl('nas.local.'), 'http://nas.local./');
+    assert.equal(normalizeUrl('app.internal:3000'), 'http://app.internal:3000/');
+    assert.equal(normalizeUrl('router.lan'), 'http://router.lan/');
+    assert.equal(normalizeUrl('127.0.0.1:8080'), 'http://127.0.0.1:8080/');
+    assert.equal(normalizeUrl('10.0.0.1'), 'http://10.0.0.1/');
+    assert.equal(normalizeUrl('192.168.1.5'), 'http://192.168.1.5/');
+    assert.equal(normalizeUrl('172.16.0.1'), 'http://172.16.0.1/');
+    assert.equal(normalizeUrl('0.0.0.0:4000'), 'http://0.0.0.0:4000/');
+    assert.equal(normalizeUrl('[::1]:3000/health'), 'http://[::1]:3000/health');
+
+    // Rejections
+    const rejected = [
+        '//evil.com',
+        '\\evil.com',
+        '/etc/passwd',
+        'https:///',
+        'https:///path',
+        'https://\\evil.com',
+        'https://.',
+        'https://..',
+        'https://foo..',
+        'https://.example.com',
+        'https://example.com:0',
+        'localhost:0',
+        'localhost:99999',
+        'javascript:1',
+        'javascript:alert(1)',
+        'javascript://alert(1)',
+        'data:text/html,hi',
+        'vbscript:1',
+        'blob:https://example.com/1',
+        'file:///etc/passwd',
+        'mailto:a@b.com',
+        'http:example.com',
+    ];
+    for (const bad of rejected) {
+        assert.equal(normalizeUrl(bad), '', `expected empty for ${bad}`);
+    }
+});
+
+test('checks host privacy helpers, safeHostname, and privacy-gated getFaviconUrl', () => {
+    assert.equal(isLocalOrPrivateHost('localhost'), true);
+    assert.equal(isLocalOrPrivateHost('sub.localhost'), true);
+    assert.equal(isLocalOrPrivateHost('nas.local.'), true);
+    assert.equal(isLocalOrPrivateHost('172.31.255.254'), true);
+    assert.equal(isLocalOrPrivateHost('172.32.0.1'), false);
+    assert.equal(isLocalOrPrivateHost('[fe80::1]'), true);
+    assert.equal(isLocalOrPrivateHost('[fd00::1]'), true);
+    assert.equal(isLocalOrPrivateHost('github.com'), false);
+
+    assert.equal(isPublicSearchableHost('github.com'), true);
+    assert.equal(isPublicSearchableHost('github.com.'), true);
+    assert.equal(isPublicSearchableHost('localhost'), false);
+    assert.equal(isPublicSearchableHost('nas.local'), false);
+    assert.equal(isPublicSearchableHost('app.internal'), false);
+    assert.equal(isPublicSearchableHost('router.lan'), false);
+    assert.equal(isPublicSearchableHost('intranet'), false);
+    assert.equal(isPublicSearchableHost('1.1.1.1'), false);
+    assert.equal(isPublicSearchableHost('[::1]'), false);
+
+    assert.equal(isBareHostWithPort('localhost:5173/api'), true);
+    assert.equal(isBareHostWithPort('example.com:8443/app'), true);
+    assert.equal(isBareHostWithPort('localhost:0'), false);
+    assert.equal(isBareHostWithPort('localhost:99999'), false);
+    assert.equal(isBareHostWithPort('javascript:1'), false);
+
+    assert.equal(safeHostname('example.com/foo'), 'example.com');
+    assert.equal(safeHostname('http://[::1]:8080/api'), '[::1]');
+    assert.equal(safeHostname('javascript:alert(1)'), '');
+    assert.equal(safeHostname(''), '');
+
+    assert.equal(
+        getFaviconUrl('https://github.com/org'),
+        'https://www.google.com/s2/favicons?domain=github.com&sz=64',
+    );
+    assert.equal(
+        getFaviconUrl('https://github.com./'),
+        'https://www.google.com/s2/favicons?domain=github.com&sz=64',
+    );
+    assert.equal(getFaviconUrl('http://localhost:3000'), '');
+    assert.equal(getFaviconUrl('http://nas.local'), '');
+    assert.equal(getFaviconUrl('http://app.internal'), '');
+    assert.equal(getFaviconUrl('http://router.lan'), '');
+    assert.equal(getFaviconUrl('http://192.168.1.1'), '');
+    assert.equal(getFaviconUrl('http://127.0.0.1:8080'), '');
+    assert.equal(getFaviconUrl('http://[::1]:8080'), '');
+    assert.equal(getFaviconUrl('http://intranet/wiki'), '');
+});
+
+test('normalizes valid aliases and rejects malformed tokens', () => {
+    assert.equal(normalizeAlias('gh'), 'gh');
+    assert.equal(normalizeAlias('!GH'), 'gh');
+    assert.equal(normalizeAlias('  !My-Docs-2  '), 'my-docs-2');
+    assert.equal(normalizeAlias('g'), 'g');
+    assert.equal(normalizeAlias('a'.repeat(32)), 'a'.repeat(32));
+
+    for (const invalid of [
+        '',
+        '   ',
+        '!',
+        '!!gh',
+        '-gh',
+        'gh-',
+        'gh search',
+        'c++',
+        'a'.repeat(33),
+    ]) {
+        assert.equal(normalizeAlias(invalid), '', `expected empty for ${invalid}`);
+    }
+});
+
+test('validates searchUrl templates safely and builds search URLs without injection or path collapse', () => {
+    assert.equal(
+        normalizeSearchUrl('github.com/search?q=%s'),
+        'https://github.com/search?q=%s',
+    );
+    assert.equal(
+        normalizeSearchUrl('https://en.wikipedia.org/wiki/%s'),
+        'https://en.wikipedia.org/wiki/%s',
+    );
+    assert.equal(
+        normalizeSearchUrl('https://app.example/#/q=%s'),
+        'https://app.example/#/q=%s',
+    );
+    assert.equal(
+        normalizeSearchUrl('localhost:3000/q?s=%s'),
+        'http://localhost:3000/q?s=%s',
+    );
+    assert.equal(
+        normalizeSearchUrl('nas.local/search?q=%s'),
+        'http://nas.local/search?q=%s',
+    );
+    assert.equal(
+        normalizeSearchUrl('https://example.com/?a=%s&b=%s'),
+        'https://example.com/?a=%s&b=%s',
+    );
+    assert.equal(
+        normalizeSearchUrl('https://user:__OMNIBAR_S__@example.com/?q=%s'),
+        'https://user:__OMNIBAR_S__@example.com/?q=%s',
+    );
+    assert.equal(
+        normalizeSearchUrl('https://omnibarsentinel.com/?q=%s'),
+        'https://omnibarsentinel.com/?q=%s',
+    );
+    assert.equal(
+        normalizeSearchUrl('https://%6fmnibarsentinel.com/?q=%s'),
+        'https://omnibarsentinel.com/?q=%s',
+    );
+
+    const rejectedTemplates = [
+        'https://example.com/search',
+        'javascript:alert("%s")',
+        'data:text/html,%s',
+        '//%s',
+        '/%s',
+        'https:///%s',
+        'https://\\%s',
+        'https://%s.example.com/?q=%s',
+        'https://user:%s@example.com/?q=%s',
+        'https://%s:pass@example.com/?q=%s',
+        'https://example.com:%s/?q=%s',
+        'https://.:80/?q=%s',
+        'https://example.com:0/?q=%s',
+    ];
+    for (const bad of rejectedTemplates) {
+        assert.equal(normalizeSearchUrl(bad), '', `expected empty for ${bad}`);
+    }
+
+    assert.equal(
+        buildSearchUrl('https://example.com/?q=%s', 'c++ & rust / a?b#c $&'),
+        'https://example.com/?q=c%2B%2B%20%26%20rust%20%2F%20a%3Fb%23c%20%24%26',
+    );
+    assert.equal(
+        encodeSearchQuery('\uD800hello\uDC00🚀'),
+        '%EF%BF%BDhello%EF%BF%BD%F0%9F%9A%80',
+    );
+    assert.equal(
+        buildSearchUrl('https://example.com/?q=%s', '\uD800hello\uDC00🚀'),
+        'https://example.com/?q=%EF%BF%BDhello%EF%BF%BD%F0%9F%9A%80',
+    );
+
+    // Prevent WHATWG %2E / %2E%2E path collapse
+    assert.equal(
+        buildSearchUrl('https://en.wikipedia.org/wiki/%s', '..'),
+        'https://en.wikipedia.org/wiki/%2E%2E',
+    );
+    assert.equal(
+        buildSearchUrl('https://en.wikipedia.org/wiki/%s', '.'),
+        'https://en.wikipedia.org/wiki/%2E',
+    );
+    assert.equal(
+        buildSearchUrl('https://www.google.com/maps/search/%s', '..'),
+        'https://www.google.com/maps/search/%2E%2E',
+    );
+    assert.equal(
+        buildSearchUrl('https://en.wikipedia.org/wiki/%s', '../admin'),
+        'https://en.wikipedia.org/wiki/..%2Fadmin',
+    );
+    assert.equal(
+        buildSearchUrl('https://en.wikipedia.org/wiki/%s', 'a/..'),
+        'https://en.wikipedia.org/wiki/a%2F..',
+    );
 });
 
 test('treats URL variants as the same identity', () => {
@@ -61,11 +280,51 @@ test('treats URL variants as the same identity', () => {
     assert.equal(urlIdentity('not a url'), '');
 });
 
-test('accepts bookmark data only when its shape and URLs are valid', () => {
+test('accepts bookmark data only when its shape, URLs, aliases, and searchUrls are valid', () => {
     assert.deepEqual(parseBookmarks('  \n  '), []);
     assert.deepEqual(
         parseBookmarks('[{"title":"Docs","url":"docs.example.com","section":"Work"}]'),
         [{ title: 'Docs', url: 'docs.example.com', section: 'Work' }],
+    );
+    assert.deepEqual(
+        parseBookmarks(`[
+            {"title":"GitHub","url":"https://github.com/","section":"Dev","alias":"!GH","searchUrl":"github.com/search?q=%s"},
+            {"title":"Notes","url":"https://notes.example/","section":"Work","alias":"  ","searchUrl":""},
+            {"title":"SoloAlias","url":"https://solo.example/","section":"Work","alias":"solo"},
+            {"title":"SoloSearch","url":"https://search.example/","section":"Work","searchUrl":"https://search.example/?q=%s"}
+        ]`),
+        [
+            {
+                title: 'GitHub',
+                url: 'https://github.com/',
+                section: 'Dev',
+                alias: 'gh',
+                searchUrl: 'https://github.com/search?q=%s',
+            },
+            { title: 'Notes', url: 'https://notes.example/', section: 'Work' },
+            { title: 'SoloAlias', url: 'https://solo.example/', section: 'Work', alias: 'solo' },
+            {
+                title: 'SoloSearch',
+                url: 'https://search.example/',
+                section: 'Work',
+                searchUrl: 'https://search.example/?q=%s',
+            },
+        ],
+    );
+    assert.throws(
+        () => parseBookmarks(`[
+            {"title":"GitHub","url":"https://github.com/","section":"Dev","alias":"gh"},
+            {"title":"Gitea","url":"https://gitea.example/","section":"Dev","alias":"!GH"}
+        ]`),
+        /Bookmark 2\.alias duplicates "gh" from Bookmark 1 \(GitHub\)\./,
+    );
+    assert.throws(
+        () => parseBookmarks('[{"title":"Bad","url":"https://example.com","section":"Dev","alias":"bad alias"}]'),
+        /Bookmark 1\.alias must be 1-32 lowercase letters, numbers, or hyphens\./,
+    );
+    assert.throws(
+        () => parseBookmarks('[{"title":"Bad","url":"https://example.com","section":"Dev","searchUrl":"https://example.com/search"}]'),
+        /Bookmark 1\.searchUrl must be a valid HTTP\(S\) search URL containing %s\./,
     );
     assert.throws(
         () => parseBookmarks('[{"title":"Docs","url":"ftp://example.com","section":"Work"}]'),
@@ -250,7 +509,7 @@ test('reads valid dropped HTTP(S) URLs from uri-list or plain text', () => {
     );
 });
 
-test('matches every search token across different bookmark fields', () => {
+test('matches every search token across fields, handles punctuation, and boosts aliases', () => {
     const bookmarks = parseBookmarks(`[
         {
             "title":"Anime Vault",
@@ -264,8 +523,26 @@ test('matches every search token across different bookmark fields', () => {
             "url":"news.example",
             "section":"Reading",
             "categories":["Anime"]
+        },
+        {
+            "title":"My Docs Reference",
+            "url":"https://docs.example/",
+            "section":"Work",
+            "alias":"my-docs"
+        },
+        {
+            "title":"Production EU Monitor",
+            "url":"https://monitor.example/",
+            "section":"Ops",
+            "alias":"mon-prod-eu"
         }
     ]`);
+
+    assert.deepEqual(searchBookmarks(bookmarks, ''), bookmarks);
+    assert.deepEqual(searchBookmarks(bookmarks, '   '), bookmarks);
+    assert.deepEqual(searchBookmarks(bookmarks, '???'), []);
+    assert.deepEqual(searchBookmarks(bookmarks, '+++'), []);
+    assert.deepEqual(searchBookmarks(bookmarks, '$$$'), []);
 
     assert.deepEqual(
         searchBookmarks(bookmarks, 'anime download').map((bookmark) => bookmark.title),
@@ -274,6 +551,14 @@ test('matches every search token across different bookmark fields', () => {
     assert.deepEqual(
         searchBookmarks(bookmarks, 'download stream').map((bookmark) => bookmark.title),
         ['Anime Vault'],
+    );
+    assert.equal(
+        searchBookmarks(bookmarks, 'my-docs')[0]?.title,
+        'My Docs Reference',
+    );
+    assert.equal(
+        searchBookmarks(bookmarks, 'mon-p')[0]?.title,
+        'Production EU Monitor',
     );
 });
 

@@ -1,10 +1,12 @@
 import Fuse from 'fuse.js';
-import { normalizeUrl } from './lib.ts';
+import { normalizeAlias, normalizeSearchUrl, normalizeUrl } from './lib.ts';
 
 export interface Bookmark {
     title: string;
     url: string;
     section: string;
+    alias?: string;
+    searchUrl?: string;
     subsection?: string;
     description?: string;
     iconUrl?: string;
@@ -34,6 +36,7 @@ const optionalStringArrays = [
 ] as const;
 
 const searchKeys = [
+    { name: 'alias', weight: 3 },
     { name: 'title', weight: 2 },
     { name: 'section', weight: 1.5 },
     { name: 'categories', weight: 1.5 },
@@ -89,24 +92,27 @@ export function parseBookmarks(content: string): Bookmark[] {
     const value: unknown = JSON.parse(content);
     if (!Array.isArray(value)) throw new Error('Expected a JSON array of bookmarks.');
 
+    const seenAliases = new Map<string, { index: number; title: string }>();
+
     return value.map((item: unknown, index) => {
+        const bookmarkNum = index + 1;
         if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-            throw new Error(`Bookmark ${index + 1} must be an object.`);
+            throw new Error(`Bookmark ${bookmarkNum} must be an object.`);
         }
 
         const record = item as Record<string, unknown>;
         for (const field of ['title', 'url', 'section'] as const) {
             if (typeof record[field] !== 'string' || !record[field].trim()) {
-                throw new Error(`Bookmark ${index + 1}.${field} must be a non-empty string.`);
+                throw new Error(`Bookmark ${bookmarkNum}.${field} must be a non-empty string.`);
             }
         }
         if (!normalizeUrl(record.url as string)) {
-            throw new Error(`Bookmark ${index + 1}.url must be a valid HTTP(S) URL.`);
+            throw new Error(`Bookmark ${bookmarkNum}.url must be a valid HTTP(S) URL.`);
         }
 
         for (const field of optionalStrings) {
             if (record[field] !== undefined && typeof record[field] !== 'string') {
-                throw new Error(`Bookmark ${index + 1}.${field} must be a string.`);
+                throw new Error(`Bookmark ${bookmarkNum}.${field} must be a string.`);
             }
         }
         for (const field of optionalStringArrays) {
@@ -115,43 +121,147 @@ export function parseBookmarks(content: string): Bookmark[] {
                 (!Array.isArray(record[field]) ||
                     record[field].some((entry) => typeof entry !== 'string'))
             ) {
-                throw new Error(`Bookmark ${index + 1}.${field} must be a string array.`);
+                throw new Error(`Bookmark ${bookmarkNum}.${field} must be a string array.`);
             }
         }
         if (record.iconUrl && !normalizeUrl(record.iconUrl as string)) {
-            throw new Error(`Bookmark ${index + 1}.iconUrl must be a valid HTTP(S) URL.`);
+            throw new Error(`Bookmark ${bookmarkNum}.iconUrl must be a valid HTTP(S) URL.`);
         }
 
-        return record as unknown as Bookmark;
+        let needsClone = false;
+        let resolvedAlias: string | undefined;
+        let hasAliasKey = false;
+
+        if (record.alias !== undefined) {
+            hasAliasKey = true;
+            if (typeof record.alias !== 'string') {
+                throw new Error(`Bookmark ${bookmarkNum}.alias must be a string.`);
+            }
+            const trimmedAlias = record.alias.trim();
+            if (trimmedAlias === '') {
+                needsClone = true;
+                resolvedAlias = undefined;
+            } else {
+                const normalizedAlias = normalizeAlias(trimmedAlias);
+                if (!normalizedAlias) {
+                    throw new Error(
+                        `Bookmark ${bookmarkNum}.alias must be 1-32 lowercase letters, numbers, or hyphens.`,
+                    );
+                }
+                const existing = seenAliases.get(normalizedAlias);
+                if (existing) {
+                    throw new Error(
+                        `Bookmark ${bookmarkNum}.alias duplicates "${normalizedAlias}" from Bookmark ${existing.index} (${existing.title}).`,
+                    );
+                }
+                seenAliases.set(normalizedAlias, {
+                    index: bookmarkNum,
+                    title: (record.title as string).trim(),
+                });
+                resolvedAlias = normalizedAlias;
+                if (record.alias !== normalizedAlias) {
+                    needsClone = true;
+                }
+            }
+        }
+
+        let resolvedSearchUrl: string | undefined;
+        let hasSearchUrlKey = false;
+
+        if (record.searchUrl !== undefined) {
+            hasSearchUrlKey = true;
+            if (typeof record.searchUrl !== 'string') {
+                throw new Error(`Bookmark ${bookmarkNum}.searchUrl must be a string.`);
+            }
+            const trimmedSearchUrl = record.searchUrl.trim();
+            if (trimmedSearchUrl === '') {
+                needsClone = true;
+                resolvedSearchUrl = undefined;
+            } else {
+                const normalizedSearchUrl = normalizeSearchUrl(trimmedSearchUrl);
+                if (!normalizedSearchUrl) {
+                    throw new Error(
+                        `Bookmark ${bookmarkNum}.searchUrl must be a valid HTTP(S) search URL containing %s.`,
+                    );
+                }
+                resolvedSearchUrl = normalizedSearchUrl;
+                if (record.searchUrl !== normalizedSearchUrl) {
+                    needsClone = true;
+                }
+            }
+        }
+
+        if (!needsClone) {
+            return record as unknown as Bookmark;
+        }
+
+        const copy = { ...(record as unknown as Bookmark) };
+        if (hasAliasKey) {
+            if (resolvedAlias !== undefined) copy.alias = resolvedAlias;
+            else delete copy.alias;
+        }
+        if (hasSearchUrlKey) {
+            if (resolvedSearchUrl !== undefined) copy.searchUrl = resolvedSearchUrl;
+            else delete copy.searchUrl;
+        }
+        return copy;
     });
 }
 
 export function searchBookmarks(bookmarks: Bookmark[], query: string): Bookmark[] {
+    const trimmed = query.trim();
+    if (!trimmed) return bookmarks;
+
+    const normalizedWholeAlias = /^!?[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/i.test(trimmed)
+        ? normalizeAlias(trimmed)
+        : '';
+    const rawAliasPrefix = trimmed.startsWith('!')
+        ? trimmed.slice(1).toLowerCase()
+        : trimmed.toLowerCase();
+    const aliasPrefix = /^[a-z0-9][a-z0-9-]{1,31}$/.test(rawAliasPrefix)
+        ? rawAliasPrefix
+        : '';
+
     const tokens = [...new Set(
-        query.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [],
+        trimmed.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [],
     )];
-    if (!tokens.length) return bookmarks;
+    if (!tokens.length && !normalizedWholeAlias && !aliasPrefix) {
+        return [];
+    }
 
-    const fuse = new Fuse(bookmarks, {
-        keys: searchKeys,
-        threshold: 0.35,
-        ignoreLocation: true,
-        includeScore: true,
-    });
-    const tokenResults = tokens.map((token) => new Map(
-        fuse.search(token).map((result) => [result.item, result.score ?? 1]),
-    ));
     const scores = new Map<Bookmark, number>();
+    if (tokens.length > 0) {
+        const fuse = new Fuse(bookmarks, {
+            keys: searchKeys,
+            threshold: 0.35,
+            ignoreLocation: true,
+            includeScore: true,
+        });
+        const tokenResults = tokens.map((token) => new Map(
+            fuse.search(token).map((result) => [result.item, result.score ?? 1]),
+        ));
+        bookmarks.forEach((bookmark) => {
+            let total = 0;
+            for (const results of tokenResults) {
+                const score = results.get(bookmark);
+                if (score === undefined) return;
+                total += score;
+            }
+            scores.set(bookmark, total);
+        });
+    }
 
-    bookmarks.forEach((bookmark) => {
-        let total = 0;
-        for (const results of tokenResults) {
-            const score = results.get(bookmark);
-            if (score === undefined) return;
-            total += score;
-        }
-        scores.set(bookmark, total);
-    });
+    if (normalizedWholeAlias || aliasPrefix) {
+        bookmarks.forEach((bookmark) => {
+            const bAlias = normalizeAlias(bookmark.alias ?? '');
+            if (!bAlias) return;
+            if (normalizedWholeAlias && bAlias === normalizedWholeAlias) {
+                scores.set(bookmark, -2);
+            } else if (aliasPrefix && bAlias.startsWith(aliasPrefix)) {
+                scores.set(bookmark, Math.min(scores.get(bookmark) ?? 0, -1));
+            }
+        });
+    }
 
     return [...scores]
         .sort(([, left], [, right]) => left - right)

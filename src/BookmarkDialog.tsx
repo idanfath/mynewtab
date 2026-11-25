@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
-import { normalizeUrl } from './lib';
-import type { Bookmark } from './bookmarks';
+import { normalizeAlias, normalizeSearchUrl, normalizeUrl } from './lib.ts';
+import type { Bookmark } from './bookmarks.ts';
 
 interface BookmarkDialogProps {
   bookmark?: Bookmark;
@@ -49,6 +49,8 @@ export default function BookmarkDialog({
   const [url, setUrl] = useState(bookmark?.url ?? '');
   const [section, setSection] = useState(bookmark?.section ?? initialSection);
   const [subsection, setSubsection] = useState(bookmark?.subsection ?? '');
+  const [alias, setAlias] = useState(bookmark?.alias ?? '');
+  const [searchUrl, setSearchUrl] = useState(bookmark?.searchUrl ?? '');
   const [description, setDescription] = useState(bookmark?.description ?? '');
   const [iconUrl, setIconUrl] = useState(bookmark?.iconUrl ?? '');
   const [tier, setTier] = useState(bookmark?.tier ?? '');
@@ -87,6 +89,24 @@ export default function BookmarkDialog({
       return;
     }
 
+    const cleanedAlias = alias.trim();
+    const cleanedSearchUrl = searchUrl.trim();
+    const normalizedAlias = cleanedAlias ? normalizeAlias(cleanedAlias) : '';
+    const normalizedSearchUrl = cleanedSearchUrl ? normalizeSearchUrl(cleanedSearchUrl) : '';
+
+    if (cleanedAlias && !normalizedAlias) {
+      setError('Shortcut must be 1–32 letters, numbers, or hyphens (e.g. gh or my-docs).');
+      return;
+    }
+    if (cleanedSearchUrl && !normalizedSearchUrl) {
+      setError('Site search URL must be a valid http:// or https:// address containing %s.');
+      return;
+    }
+    if (normalizedSearchUrl && !normalizedAlias) {
+      setError('Add a shortcut (!bang) to use a site search URL.');
+      return;
+    }
+
     const resolvedSection = sections.find(
       (name) => name.toLocaleLowerCase() === cleanedSection.toLocaleLowerCase(),
     ) ?? cleanedSection;
@@ -97,6 +117,12 @@ export default function BookmarkDialog({
       url: cleanedUrl,
       section: resolvedSection,
     };
+    if (normalizedAlias) nextBookmark.alias = normalizedAlias;
+    else delete nextBookmark.alias;
+
+    if (normalizedSearchUrl) nextBookmark.searchUrl = normalizedSearchUrl;
+    else delete nextBookmark.searchUrl;
+
     setOptionalString(nextBookmark, 'subsection', subsection);
     setOptionalString(nextBookmark, 'description', description);
     setOptionalString(nextBookmark, 'iconUrl', iconUrl);
@@ -171,6 +197,25 @@ export default function BookmarkDialog({
               <label>
                 <span>Group</span>
                 <input value={subsection} onChange={(event) => setSubsection(event.target.value)} />
+              </label>
+              <label>
+                <span>Shortcut (!bang)</span>
+                <input
+                  placeholder="gh"
+                  value={alias}
+                  onChange={(event) => setAlias(event.target.value)}
+                />
+                <small>Optional jump &amp; search token (e.g. gh).</small>
+              </label>
+              <label>
+                <span>Site search URL</span>
+                <input
+                  inputMode="url"
+                  placeholder="https://example.com/search?q=%s"
+                  value={searchUrl}
+                  onChange={(event) => setSearchUrl(event.target.value)}
+                />
+                <small>Optional — include %s for query (requires shortcut).</small>
               </label>
               <label className="is-wide">
                 <span>Description</span>

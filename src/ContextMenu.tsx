@@ -5,7 +5,8 @@ import {
   useState,
   type KeyboardEvent,
 } from 'react';
-import type { Bookmark } from './bookmarks';
+import type { Bookmark } from './bookmarks.ts';
+import { normalizeAlias, normalizeSearchUrl } from './lib.ts';
 
 export type ContextMenuTarget =
   | { kind: 'bookmark'; bookmark: Bookmark }
@@ -17,6 +18,7 @@ interface ContextMenuProps {
   target: ContextMenuTarget;
   sections: string[];
   onOpenNewTab: (bookmark: Bookmark) => void;
+  onSearchSite: (bookmark: Bookmark) => void;
   onCopyUrl: (bookmark: Bookmark) => void;
   onEditBookmark: (bookmark: Bookmark) => void;
   onMoveBookmark: (bookmark: Bookmark, targetSection: string) => void;
@@ -37,6 +39,7 @@ export default function ContextMenu({
   target,
   sections,
   onOpenNewTab,
+  onSearchSite,
   onCopyUrl,
   onEditBookmark,
   onMoveBookmark,
@@ -285,6 +288,18 @@ export default function ContextMenu({
             >
               <span>Open in new tab</span>
             </button>
+            {normalizeAlias(target.bookmark.alias ?? '')
+              && normalizeSearchUrl(target.bookmark.searchUrl ?? '') && (
+              <button
+                type="button"
+                role="menuitem"
+                className="app-context-menu-item"
+                onClick={() => onSearchSite(target.bookmark)}
+              >
+                <span>Search {target.bookmark.title}…</span>
+                <small>!{normalizeAlias(target.bookmark.alias ?? '')}</small>
+              </button>
+            )}
             <button
               type="button"
               role="menuitem"
