@@ -5,8 +5,24 @@ export const BOOKMARK_DRAG_TYPE = 'application/x-mynewtab-bookmark';
 
 export type DropMode = 'file' | 'url' | null;
 
+export interface DataTransferItemLike {
+  kind: string;
+  type: string;
+}
+
+export function isBookmarkFileName(name: string): boolean {
+  return /\.(?:json|html?)$/i.test(name.trim());
+}
+
+export function isBookmarkFileMime(type: string): boolean {
+  const base = type.split(';')[0].trim().toLowerCase();
+  return base === 'application/json' || base === 'text/html';
+}
+
 export function detectDropMode(
-  dataTransfer: Pick<DataTransfer, 'types'>,
+  dataTransfer: Pick<DataTransfer, 'types'> & {
+    items?: ArrayLike<DataTransferItemLike>;
+  },
   allowFiles: boolean,
 ): DropMode {
   const types = Array.from(dataTransfer.types);
@@ -16,7 +32,17 @@ export function detectDropMode(
   ) {
     return null;
   }
-  if (allowFiles && types.includes('Files')) return 'file';
+
+  if (allowFiles && types.includes('Files')) {
+    if (!dataTransfer.items) return 'file';
+    if (!types.includes('text/uri-list')) return 'file';
+
+    const hasBookmarkFileItem = Array.from(dataTransfer.items).some(
+      (item) => item.kind === 'file' && isBookmarkFileMime(item.type),
+    );
+    if (hasBookmarkFileItem) return 'file';
+  }
+
   if (
     types.includes('text/uri-list')
     || types.includes('text/html')

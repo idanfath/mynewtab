@@ -4,19 +4,21 @@ Personal new-tab page built with React, TypeScript, Vite, Tailwind CSS, and Mona
 
 ## Features
 
-- Flat JSON bookmark data with validation.
-- Import, export, and edit bookmarks in the browser.
+- Flat JSON bookmark data with validation plus universal browser Netscape Bookmark HTML (`.html` / `.htm`) import and export (Chrome, Brave, Edge, Firefox, Safari).
+- Diff-aware Import Studio when importing into an existing directory: choose **Merge & Enrich**, **Add New Only**, or **Replace Directory** with live `+added / ~changed / -removed` previews before committing.
+- Local Snapshot Vault (`History` button or `h` shortcut): automatic pre-mutation snapshots before bulk imports, JSON edits, section removals, and restores; manual named checkpoints; live diff preview, one-click restore, per-snapshot `.json` / `.html` export, and corrupt-backup repair rescue.
+- Multi-tab `localStorage` synchronization with active-modal conflict detection (`Load external changes` or `Save mine` with automatic History backup of the external version).
 - Add, edit, delete, and restore individual bookmarks without editing JSON.
 - Rename sections or remove them by moving or deleting their bookmarks.
-- Drop browser links into a section, or anywhere to use `Uncategorized`.
-- Local persistence through `localStorage`.
-- Fuzzy search across titles, sections, categories, capabilities, and notes.
-- Drag-and-drop section ordering.
+- Drop browser links into any section (or anywhere to use `Uncategorized`), or drop `.json` / `.html` files anywhere to import.
+- Local persistence through `localStorage` with quota-safe snapshot eviction that always prioritizes active bookmarks.
+- Fuzzy search across titles, sections, categories, capabilities, and notes (`/` shortcut).
+- Drag-and-drop section and bookmark ordering.
 - Bundled background and app icon assets with production caching on Vercel.
 
 ## Bookmark format
 
-Bookmarks are stored as a JSON array. `title`, `url`, and `section` are required; other fields are optional.
+Bookmarks are stored as a JSON array (and can also be imported/exported as standard Netscape Bookmark HTML). `title`, `url`, and `section` are required; other fields are optional.
 
 ```json
 [

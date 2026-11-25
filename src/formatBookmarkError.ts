@@ -1,4 +1,4 @@
-import type { AppError } from './useBookmarks';
+import type { AppError } from './useBookmarks.ts';
 
 export function jsonErrorLocation(error: SyntaxError, content: string): string {
   const position = error.message.match(/position\s+(\d+)/i)?.[1];
@@ -26,6 +26,41 @@ export function formatBookmarkError(
     return {
       title,
       detail: 'Top level must be an array of bookmark objects.',
+    };
+  }
+
+  if (message === 'Unrecognized bookmark file format.') {
+    return {
+      title,
+      detail: 'Choose a .json bookmark export or a browser-exported .html bookmark file.',
+    };
+  }
+
+  if (message === 'No bookmarks found in HTML file.') {
+    return {
+      title,
+      detail: 'No bookmarks were found in that HTML file.',
+    };
+  }
+
+  if (message === 'No bookmarks found in JSON file.') {
+    return {
+      title,
+      detail: 'No bookmarks were found in that JSON file.',
+    };
+  }
+
+  if (/^No valid http:\/\/ or https:\/\/ bookmarks found/.test(message)) {
+    return {
+      title,
+      detail: message,
+    };
+  }
+
+  if (/^Bookmark \d+: section “All” is reserved/.test(message)) {
+    return {
+      title,
+      detail: message,
     };
   }
 

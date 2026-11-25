@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -11,25 +12,36 @@ import {
 } from 'react';
 import Editor from '@monaco-editor/react';
 import icon from './assets/icon.png';
-import BookmarkDialog from './BookmarkDialog';
-import ContextMenu, { type ContextMenuTarget } from './ContextMenu';
-import SectionDialog from './SectionDialog';
-import { getFaviconUrl, normalizeUrl, urlIdentity } from './lib';
-import TypewriterText, { TYPEWRITER_DURATION } from './TypewriterText';
-import { useBookmarks, storageError, type AppError } from './useBookmarks';
-import { ErrorNotice, MetaList, UndoNotice } from './notices';
-import { formatBookmarkError } from './formatBookmarkError';
-import { tierRank } from './tierRank';
+import BookmarkDialog from './BookmarkDialog.tsx';
+import ContextMenu, { type ContextMenuTarget } from './ContextMenu.tsx';
+import ImportMergeDialog from './ImportMergeDialog.tsx';
+import SectionDialog from './SectionDialog.tsx';
+import SnapshotDialog from './SnapshotDialog.tsx';
+import { getFaviconUrl, normalizeUrl, urlIdentity } from './lib.ts';
+import TypewriterText, { TYPEWRITER_DURATION } from './TypewriterText.tsx';
+import { useBookmarks, storageError, type AppError } from './useBookmarks.ts';
+import {
+  ErrorNotice,
+  ExternalConflictBanner,
+  MetaList,
+  UndoNotice,
+} from './notices.tsx';
+import { formatBookmarkError } from './formatBookmarkError.ts';
+import { tierRank } from './tierRank.ts';
 import {
   BOOKMARK_DRAG_TYPE,
   SECTION_DRAG_TYPE,
   detectDropMode,
+  isBookmarkFileMime,
+  isBookmarkFileName,
   readDroppedTitle,
   readDroppedUrl,
   resolveDropSection,
   type DropMode,
-} from './dropHandlers';
+} from './dropHandlers.ts';
 import {
+  BACKUP_KEY,
+  STORAGE_KEY,
   groupBookmarksBySection,
   insertBookmarkInSection,
   moveBookmarkToSection,
@@ -38,23 +50,58 @@ import {
   reorderBookmarkSections,
   searchBookmarks,
   type Bookmark,
-} from './bookmarks';
+} from './bookmarks.ts';
+import {
+  parseEditorBookmarks,
+  parseImportedBookmarkFile,
+  serializeBookmarksHtml,
+  type BookmarkFileFormat,
+} from './bookmarkHtml.ts';
+import { applyBookmarkMerge, type MergeStrategy } from './bookmarkMerge.ts';
+import {
+  SNAPSHOTS_KEY,
+  cloneBookmark,
+  computeBookmarksHash,
+  safeGetItem,
+  type BookmarkSnapshot,
+  type SnapshotRequest,
+} from './snapshotVault.ts';
+import {
+  detectDiskConflict,
+  evaluateExternalBookmarkChange,
+  normalizeExternalBookmarks,
+  reconcileViewAfterSync,
+  type ExternalSyncConflict,
+} from './storageSync.ts';
+import {
+  downloadTextFile,
+  focusConflictBanner,
+  restoreFocusSafely,
+} from './dialogFocus.ts';
 import './App.css';
 
 const EMPTY_HEADING = 'Bring your index.';
 const DROP_HEADING = 'Drop your file.';
 const URL_DROP_HEADING = 'Drop your URL.';
-const EMPTY_COPY = 'Choose your bookmarks.json. It stays in this browser and is never uploaded.';
-const DROP_COPY = 'Drop your bookmarks.json anywhere. It stays in this browser and is never uploaded.';
+const EMPTY_COPY = 'Choose bookmarks.json or browser bookmarks.html. Everything stays in this browser.';
+const DROP_COPY = 'Drop bookmarks.json or bookmarks.html anywhere. Everything stays in this browser.';
 const URL_DROP_COPY = 'Drop your URL anywhere. It will be saved locally in the Uncategorized section.';
 
 type BookmarkDialogState =
-  | { mode: 'add'; initialSection: string }
-  | { mode: 'edit'; bookmark: Bookmark };
+  | { mode: 'add'; initialSection: string; revision: number }
+  | { mode: 'edit'; bookmark: Bookmark; revision: number };
 
 interface SectionDialogState {
   mode: 'rename' | 'delete';
   section: string;
+}
+
+interface ImportMergeDialogState {
+  fileName: string;
+  format: BookmarkFileFormat;
+  bookmarks: Bookmark[];
+  skippedNonHttpCount: number;
+  intraFileDuplicateCount: number;
 }
 
 interface ContextMenuState {
@@ -91,14 +138,30 @@ function getBookmarkDropPosition(
   return event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
 }
 
+function getLocalStorageSafely(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 function App() {
   const {
     bookmarks,
     initialError,
     undoState,
+    snapshots,
+    corruptBackup,
     persist,
+    persistWithMeta,
     restoreUndo,
     clearUndo,
+    createCheckpoint,
+    deleteSnapshot,
+    dismissCorruptBackup,
+    refreshVaultFromStorage,
+    applyExternalBookmarksState,
   } = useBookmarks();
   const [query, setQuery] = useState('');
   const [section, setSection] = useState('All');
@@ -120,12 +183,21 @@ function App() {
   const [editorClosing, setEditorClosing] = useState(false);
   const [editorContent, setEditorContent] = useState('');
   const [editorError, setEditorError] = useState<AppError | null>(null);
+  const [editorRepairMode, setEditorRepairMode] = useState(false);
   const [error, setError] = useState<AppError | null>(() => initialError);
   const [dropMode, setDropMode] = useState<DropMode>(null);
   const [urlDropSection, setUrlDropSection] = useState<string | null>(null);
   const [bookmarkDialog, setBookmarkDialog] = useState<BookmarkDialogState | null>(null);
   const [sectionDialog, setSectionDialog] = useState<SectionDialogState | null>(null);
+  const [importMergeDialog, setImportMergeDialog] = useState<ImportMergeDialogState | null>(null);
+  const [snapshotDialog, setSnapshotDialog] = useState(false);
+  const [externalConflict, setExternalConflict] = useState<ExternalSyncConflict | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportMenuPos, setExportMenuPos] = useState<{ left: number; top: number }>({
+    left: 16,
+    top: 16,
+  });
   const [statusToast, setStatusToast] = useState<StatusToast | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -139,13 +211,238 @@ function App() {
   const pendingScrollBookmarkRef = useRef<Bookmark | null>(null);
   const contextMenuTriggerRef = useRef<HTMLElement | null>(null);
   const contextMenuIdRef = useRef(0);
+  const modalTriggerRef = useRef<HTMLElement | null>(null);
+  const exportButtonRef = useRef<HTMLButtonElement>(null);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const editorDialogRef = useRef<HTMLElement>(null);
+  const closeEditorRef = useRef<(shouldConverge?: boolean) => void>(() => {});
+  const editorCloseTimerRef = useRef<number | null>(null);
+  const modalBaseHashRef = useRef<string | null>(null);
+  const modalBaseBookmarksRef = useRef<Bookmark[] | null>(null);
+
+  const isEditModalOpen = (editorOpen && !editorClosing)
+    || bookmarkDialog !== null
+    || sectionDialog !== null
+    || importMergeDialog !== null;
+  const isAnyModalVisible = editorOpen
+    || bookmarkDialog !== null
+    || sectionDialog !== null
+    || importMergeDialog !== null
+    || snapshotDialog;
+
+  const syncStateRef = useRef({
+    bookmarks,
+    section,
+    activeBookmark,
+    isEditModalOpen,
+  });
+  syncStateRef.current = {
+    bookmarks,
+    section,
+    activeBookmark,
+    isEditModalOpen,
+  };
+
+  useEffect(() => {
+    if (!isEditModalOpen) {
+      modalBaseHashRef.current = null;
+      modalBaseBookmarksRef.current = null;
+    }
+  }, [isEditModalOpen]);
+
+  useEffect(() => {
+    if (bookmarks.length === 0) {
+      setExportMenuOpen(false);
+      setContextMenu(null);
+    }
+  }, [bookmarks.length]);
+
+  useEffect(() => {
+    if (!editorOpen || editorClosing) return;
+    const frameId = window.requestAnimationFrame(() => {
+      const dialogEl = editorDialogRef.current;
+      if (!dialogEl) return;
+      const active = document.activeElement;
+      if (!active || !dialogEl.contains(active)) {
+        dialogEl.focus({ preventScroll: true });
+      }
+    });
+    const handleEditorEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.isComposing || event.defaultPrevented) return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeEditorRef.current(true);
+      }
+    };
+    document.addEventListener('keydown', handleEditorEscape);
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      document.removeEventListener('keydown', handleEditorEscape);
+    };
+  }, [editorOpen, editorClosing]);
+
+  useEffect(() => {
+    return () => {
+      if (editorCloseTimerRef.current !== null) {
+        window.clearTimeout(editorCloseTimerRef.current);
+      }
+    };
+  }, []);
+
+  const captureModalOpenContext = useCallback((trigger?: HTMLElement | null) => {
+    if (trigger !== undefined) {
+      modalTriggerRef.current = trigger;
+      return;
+    }
+    const active = document.activeElement;
+    modalTriggerRef.current = active instanceof HTMLElement ? active : null;
+  }, []);
+
+  const captureEditBaseline = useCallback((baseBookmarks: Bookmark[]) => {
+    modalBaseHashRef.current = computeBookmarksHash(baseBookmarks);
+    modalBaseBookmarksRef.current = baseBookmarks;
+    setExternalConflict(null);
+  }, []);
+
+  const convergeFromDiskIfNeeded = useCallback(() => {
+    if (!externalConflict) return;
+    setExternalConflict(null);
+    const storage = getLocalStorageSafely();
+    if (!storage) return;
+    const raw = safeGetItem(storage, STORAGE_KEY);
+    let diskBookmarks: Bookmark[];
+    if (raw === null || !raw.trim()) {
+      diskBookmarks = [];
+    } else {
+      try {
+        diskBookmarks = normalizeExternalBookmarks(parseBookmarks(raw));
+      } catch {
+        return;
+      }
+    }
+    applyExternalBookmarksState(diskBookmarks);
+    const reconciled = reconcileViewAfterSync(diskBookmarks, section, activeBookmark);
+    setSection(reconciled.section);
+    setActiveBookmark(reconciled.activeBookmark);
+    setKeyboardSelection(false);
+  }, [activeBookmark, applyExternalBookmarksState, externalConflict, section]);
+
+  // Single cross-tab localStorage sync listener
+  useEffect(() => {
+    const handleStorageEvent = (event: StorageEvent) => {
+      const storage = getLocalStorageSafely();
+      if (event.storageArea && storage && event.storageArea !== storage) return;
+
+      if (
+        event.key === SNAPSHOTS_KEY
+        || event.key === BACKUP_KEY
+        || event.key === null
+      ) {
+        refreshVaultFromStorage();
+      }
+
+      if (event.key !== STORAGE_KEY && event.key !== null) return;
+
+      const snapshot = syncStateRef.current;
+      const transition = evaluateExternalBookmarkChange({
+        rawNewValue: event.newValue,
+        currentBookmarks: snapshot.bookmarks,
+        currentSection: snapshot.section,
+        currentActiveBookmark: snapshot.activeBookmark,
+        isEditModalOpen: snapshot.isEditModalOpen,
+        modalBaseHash: modalBaseHashRef.current,
+        modalBaseBookmarks: modalBaseBookmarksRef.current,
+      });
+
+      if (transition.kind === 'invalid-external') {
+        refreshVaultFromStorage();
+        setError({
+          title: 'External bookmark update invalid',
+          detail: 'Another tab wrote invalid bookmark data. Your open tab kept its valid copy.',
+        });
+        return;
+      }
+
+      if (transition.kind === 'noop') return;
+
+      if (transition.kind === 'background-sync') {
+        clearUndo();
+        setExportMenuOpen(false);
+        setContextMenu(null);
+        applyExternalBookmarksState(transition.bookmarks);
+        setSection(transition.section);
+        setActiveBookmark(transition.activeBookmark);
+        setKeyboardSelection(false);
+        return;
+      }
+
+      if (transition.kind === 'modal-reverted') {
+        clearUndo();
+        setExternalConflict(null);
+        return;
+      }
+
+      if (transition.kind === 'modal-conflict') {
+        clearUndo();
+        setExternalConflict(transition.conflict);
+      }
+    };
+
+    window.addEventListener('storage', handleStorageEvent);
+    return () => window.removeEventListener('storage', handleStorageEvent);
+  }, [applyExternalBookmarksState, clearUndo, refreshVaultFromStorage]);
+
+  const openBookmarkDialog = useCallback(
+    (
+      next: { mode: 'add'; initialSection: string } | { mode: 'edit'; bookmark: Bookmark },
+      trigger?: HTMLElement | null,
+    ) => {
+      captureModalOpenContext(trigger);
+      captureEditBaseline(bookmarks);
+      setBookmarkDialog(
+        next.mode === 'add'
+          ? { mode: 'add', initialSection: next.initialSection, revision: 0 }
+          : { mode: 'edit', bookmark: next.bookmark, revision: 0 },
+      );
+    },
+    [bookmarks, captureEditBaseline, captureModalOpenContext],
+  );
+
+  const openSectionDialog = useCallback(
+    (next: SectionDialogState, trigger?: HTMLElement | null) => {
+      captureModalOpenContext(trigger);
+      captureEditBaseline(bookmarks);
+      setSectionDialog(next);
+    },
+    [bookmarks, captureEditBaseline, captureModalOpenContext],
+  );
+
+  const openSnapshotDialog = useCallback(() => {
+    captureModalOpenContext();
+    setExportMenuOpen(false);
+    setContextMenu(null);
+    setSnapshotDialog(true);
+  }, [captureModalOpenContext]);
+
+  const closeSnapshotDialog = useCallback(() => {
+    setSnapshotDialog(false);
+    restoreFocusSafely(modalTriggerRef.current);
+  }, []);
 
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const isTyping = target?.isContentEditable
         || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '');
-      if (isTyping || editorOpen || bookmarkDialog || sectionDialog || contextMenu) return;
+      if (
+        isTyping
+        || event.isComposing
+        || isAnyModalVisible
+        || contextMenu
+        || exportMenuOpen
+      ) {
+        return;
+      }
 
       if (
         event.key === '/'
@@ -163,21 +460,134 @@ function App() {
         && !event.altKey
       ) {
         event.preventDefault();
-        setBookmarkDialog({
+        openBookmarkDialog({
           mode: 'add',
           initialSection: section === 'All' ? 'Uncategorized' : section,
         });
+      } else if (
+        event.key === 'h'
+        && !event.ctrlKey
+        && !event.metaKey
+        && !event.altKey
+        && !event.shiftKey
+      ) {
+        event.preventDefault();
+        openSnapshotDialog();
       }
     };
     document.addEventListener('keydown', handleShortcut);
     return () => document.removeEventListener('keydown', handleShortcut);
-  }, [bookmarkDialog, contextMenu, editorOpen, section, sectionDialog]);
+  }, [
+    contextMenu,
+    exportMenuOpen,
+    isAnyModalVisible,
+    openBookmarkDialog,
+    openSnapshotDialog,
+    section,
+  ]);
 
   useEffect(() => {
     if (!statusToast) return;
     const timeoutId = window.setTimeout(() => setStatusToast(null), 2200);
     return () => window.clearTimeout(timeoutId);
   }, [statusToast]);
+
+  // Export popover positioning & dismiss listeners
+  useLayoutEffect(() => {
+    if (!exportMenuOpen) return;
+    const trigger = exportButtonRef.current;
+    const menu = exportMenuRef.current;
+    if (!trigger || !menu) return;
+
+    const triggerRect = trigger.getBoundingClientRect();
+    const menuRect = menu.getBoundingClientRect();
+    const margin = 8;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const menuWidth = menuRect.width || 192;
+    const menuHeight = menuRect.height || 88;
+
+    const preferredTop = triggerRect.top >= menuHeight + 12
+      ? triggerRect.top - menuHeight - 6
+      : triggerRect.bottom + 6;
+    const top = Math.round(
+      Math.max(margin, Math.min(preferredTop, viewportHeight - menuHeight - margin)),
+    );
+    const left = Math.round(
+      Math.max(margin, Math.min(triggerRect.left, viewportWidth - menuWidth - margin)),
+    );
+
+    setExportMenuPos((current) => (
+      current.left === left && current.top === top
+        ? current
+        : { left, top }
+    ));
+  }, [exportMenuOpen]);
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const firstItem = exportMenuRef.current?.querySelector<HTMLElement>('[role="menuitem"]');
+    firstItem?.focus({ preventScroll: true });
+
+    const handleDismiss = () => setExportMenuOpen(false);
+    const handleScroll = (event: Event) => {
+      if (event.target instanceof Node && exportMenuRef.current?.contains(event.target)) {
+        return;
+      }
+      setExportMenuOpen(false);
+    };
+
+    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('resize', handleDismiss);
+    window.addEventListener('blur', handleDismiss);
+    window.addEventListener('dragstart', handleDismiss, true);
+    return () => {
+      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('resize', handleDismiss);
+      window.removeEventListener('blur', handleDismiss);
+      window.removeEventListener('dragstart', handleDismiss, true);
+    };
+  }, [exportMenuOpen]);
+
+  const closeExportMenu = (restoreFocus: boolean) => {
+    setExportMenuOpen(false);
+    if (restoreFocus) {
+      restoreFocusSafely(exportButtonRef.current);
+    }
+  };
+
+  const handleExportMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const menu = exportMenuRef.current;
+    if (!menu) return;
+
+    if (event.key === 'Escape' || event.key === 'Tab') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeExportMenu(true);
+      return;
+    }
+
+    const items = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+    if (!items.length) return;
+    const active = document.activeElement as HTMLElement | null;
+    const activeIndex = active ? items.indexOf(active) : -1;
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      const next = activeIndex < 0 ? 0 : (activeIndex + 1) % items.length;
+      items[next].focus({ preventScroll: true });
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      const prev = activeIndex <= 0 ? items.length - 1 : activeIndex - 1;
+      items[prev].focus({ preventScroll: true });
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      items[0].focus({ preventScroll: true });
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      items[items.length - 1].focus({ preventScroll: true });
+    }
+  };
 
   const sectionCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -246,16 +656,83 @@ function App() {
     });
   };
 
-  const applyBookmarks = (nextBookmarks: Bookmark[]) => {
-    if (!persist(nextBookmarks, null)) {
-      setError(storageError('Couldn’t import bookmarks'));
+  const checkPreWriteConflict = (
+    overwriteExternalConflict?: boolean,
+  ): { blocked: boolean; conflictForBackup: ExternalSyncConflict | null } => {
+    if (overwriteExternalConflict) {
+      if (externalConflict) {
+        return { blocked: false, conflictForBackup: externalConflict };
+      }
+      const storage = getLocalStorageSafely();
+      const diskConflict = storage
+        ? detectDiskConflict(storage, modalBaseHashRef.current, modalBaseBookmarksRef.current)
+        : null;
+      return { blocked: false, conflictForBackup: diskConflict };
+    }
+
+    if (externalConflict) {
+      return { blocked: true, conflictForBackup: externalConflict };
+    }
+
+    const storage = getLocalStorageSafely();
+    if (storage) {
+      const diskConflict = detectDiskConflict(
+        storage,
+        modalBaseHashRef.current,
+        modalBaseBookmarksRef.current,
+      );
+      if (diskConflict) {
+        setExternalConflict(diskConflict);
+        return { blocked: true, conflictForBackup: diskConflict };
+      }
+    }
+
+    return { blocked: false, conflictForBackup: null };
+  };
+
+  const handleLoadExternalChanges = () => {
+    if (!externalConflict) return;
+    const ext = externalConflict.externalBookmarks;
+    applyExternalBookmarksState(ext);
+    const reconciled = reconcileViewAfterSync(ext, section, activeBookmark);
+    setSection(reconciled.section);
+    setActiveBookmark(reconciled.activeBookmark);
+    setKeyboardSelection(false);
+    modalBaseHashRef.current = externalConflict.externalHash;
+    modalBaseBookmarksRef.current = ext;
+    setExternalConflict(null);
+
+    if (editorOpen && !editorClosing) {
+      setEditorContent(JSON.stringify(ext, null, 2));
+      setEditorError(null);
+      setEditorRepairMode(false);
       return;
     }
-    setSection('All');
-    setQuery('');
-    setActiveBookmark(nextBookmarks[0] ?? null);
-    setKeyboardSelection(false);
-    setError(null);
+
+    if (bookmarkDialog?.mode === 'edit') {
+      const targetId = urlIdentity(bookmarkDialog.bookmark.url);
+      const matched = ext.find((item) => urlIdentity(item.url) === targetId);
+      if (matched) {
+        setBookmarkDialog({
+          mode: 'edit',
+          bookmark: matched,
+          revision: bookmarkDialog.revision + 1,
+        });
+      } else {
+        setBookmarkDialog(null);
+        restoreFocusSafely(modalTriggerRef.current);
+        setStatusToast({ title: 'Bookmark removed in another tab' });
+      }
+      return;
+    }
+
+    if (sectionDialog) {
+      if (!ext.some((item) => item.section === sectionDialog.section)) {
+        setSectionDialog(null);
+        restoreFocusSafely(modalTriggerRef.current);
+        setStatusToast({ title: 'Section changed in another tab' });
+      }
+    }
   };
 
   const reorderSection = (
@@ -274,7 +751,7 @@ function App() {
     if (persist(nextBookmarks, null)) {
       setActiveBookmark(null);
       setKeyboardSelection(false);
-      setError(null);
+      if (!corruptBackup) setError(null);
     } else {
       setError(storageError('Couldn’t save section order'));
     }
@@ -322,7 +799,7 @@ function App() {
       setSection('All');
     }
     setKeyboardSelection(false);
-    setError(null);
+    if (!corruptBackup) setError(null);
   };
 
   const moveBookmarkAt = (
@@ -353,20 +830,125 @@ function App() {
     } catch {
       setError({
         title: 'Couldn’t read file',
-        detail: 'Choose a readable JSON file and try again.',
+        detail: 'Choose a readable JSON or HTML bookmark file and try again.',
       });
       return;
     }
 
-    let nextBookmarks: Bookmark[];
+    let parsed;
     try {
-      nextBookmarks = parseBookmarks(content);
+      parsed = parseImportedBookmarkFile(content, file.name);
     } catch (parseError) {
       setError(formatBookmarkError(parseError, content, 'Couldn’t import bookmarks'));
       return;
     }
 
-    applyBookmarks(nextBookmarks);
+    if (bookmarks.length === 0) {
+      const importedBookmarks = applyBookmarkMerge([], parsed.bookmarks, 'replace');
+      const result = persistWithMeta(importedBookmarks, null);
+      if (!result.ok) {
+        setError(storageError('Couldn’t import bookmarks'));
+        return;
+      }
+      setSection('All');
+      setQuery('');
+      setActiveBookmark(importedBookmarks[0] ?? null);
+      setKeyboardSelection(false);
+      if (!corruptBackup) setError(null);
+      setStatusToast({
+        title: `Imported ${importedBookmarks.length} bookmark${importedBookmarks.length === 1 ? '' : 's'}`,
+        detail: parsed.skippedNonHttpCount > 0
+          ? `${parsed.skippedNonHttpCount} non-web link${parsed.skippedNonHttpCount === 1 ? '' : 's'} skipped`
+          : undefined,
+      });
+      return;
+    }
+
+    captureModalOpenContext();
+    captureEditBaseline(bookmarks);
+    if (!corruptBackup) setError(null);
+    setImportMergeDialog({
+      fileName: file.name,
+      format: parsed.format,
+      bookmarks: parsed.bookmarks,
+      skippedNonHttpCount: parsed.skippedNonHttpCount,
+      intraFileDuplicateCount: parsed.intraFileDuplicateCount,
+    });
+  };
+
+  const commitImportMerge = (
+    strategy: MergeStrategy,
+    options?: { overwriteExternalConflict?: boolean },
+  ): string | null => {
+    if (!importMergeDialog) return null;
+
+    const { blocked, conflictForBackup } = checkPreWriteConflict(
+      options?.overwriteExternalConflict,
+    );
+    if (blocked) return null;
+
+    const nextBookmarks = applyBookmarkMerge(
+      bookmarks,
+      importMergeDialog.bookmarks,
+      strategy,
+    );
+
+    const snapshotRequests: SnapshotRequest[] = [];
+    if (options?.overwriteExternalConflict && conflictForBackup) {
+      snapshotRequests.push({
+        trigger: 'external-conflict',
+        label: 'External tab changes before overwrite',
+        bookmarks: conflictForBackup.externalBookmarks,
+      });
+    }
+    snapshotRequests.push({
+      trigger: strategy === 'replace' ? 'pre-replace' : 'pre-import',
+      label: strategy === 'replace'
+        ? `Before replacing with ${importMergeDialog.fileName}`
+        : `Before importing ${importMergeDialog.fileName}`,
+    });
+
+    const result = persistWithMeta(nextBookmarks, null, {
+      snapshots: snapshotRequests,
+    });
+    if (!result.ok) {
+      return 'Browser storage is full, blocked, or unavailable. Existing bookmarks were not changed.';
+    }
+
+    const nextSection = strategy === 'replace'
+      ? 'All'
+      : section === 'All' || nextBookmarks.some((item) => item.section === section)
+        ? section
+        : 'All';
+    setSection(nextSection);
+    setQuery('');
+    setActiveBookmark(nextBookmarks[0] ?? null);
+    setKeyboardSelection(false);
+    if (!corruptBackup) setError(null);
+    setExternalConflict(null);
+    setImportMergeDialog(null);
+    restoreFocusSafely(modalTriggerRef.current);
+
+    if (options?.overwriteExternalConflict && conflictForBackup) {
+      setStatusToast({
+        title: 'Changes saved',
+        detail: 'External tab version backed up to History',
+      });
+    } else {
+      setStatusToast({
+        title: strategy === 'replace' ? 'Directory replaced' : 'Bookmarks imported',
+        detail: result.snapshotWarning
+          ? 'Saved (storage full — history backup skipped)'
+          : `${nextBookmarks.length} bookmark${nextBookmarks.length === 1 ? '' : 's'} in directory`,
+      });
+    }
+    return null;
+  };
+
+  const cancelImportMerge = () => {
+    setImportMergeDialog(null);
+    convergeFromDiskIfNeeded();
+    restoreFocusSafely(modalTriggerRef.current);
   };
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -428,14 +1010,18 @@ function App() {
     allowFiles: boolean,
   ) => {
     if (contextMenu) setContextMenu(null);
-    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (exportMenuOpen) setExportMenuOpen(false);
+    if (isAnyModalVisible) return;
     const mode = detectDropMode(event.dataTransfer, allowFiles);
     if (!mode) return;
     event.preventDefault();
     dropDepthRef.current += 1;
+    const isEmptyState = bookmarks.length === 0;
+    clearUndo();
     if (mode === 'url') {
-      clearUndo();
-      setUrlDropSection(allowFiles ? null : getHoveredDropSection(event.target));
+      setUrlDropSection(isEmptyState ? null : getHoveredDropSection(event.target));
+    } else {
+      setUrlDropSection(null);
     }
     setDropMode(mode);
   };
@@ -444,7 +1030,7 @@ function App() {
     event: DragEvent<HTMLElement>,
     allowFiles: boolean,
   ) => {
-    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (isAnyModalVisible) return;
     if (Array.from(event.dataTransfer.types).includes(BOOKMARK_DRAG_TYPE)) {
       updateBookmarkDropTarget(null);
       updateBookmarkDropSection(null);
@@ -454,10 +1040,14 @@ function App() {
     if (!mode) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
+    const isEmptyState = bookmarks.length === 0;
     if (mode === 'url') {
-      const hovered = allowFiles ? null : getHoveredDropSection(event.target);
+      const hovered = isEmptyState ? null : getHoveredDropSection(event.target);
       setUrlDropSection((current) => (current === hovered ? current : hovered));
       setDropMode((current) => (current === 'url' ? current : 'url'));
+    } else {
+      setUrlDropSection(null);
+      setDropMode((current) => (current === 'file' ? current : 'file'));
     }
   };
 
@@ -471,30 +1061,6 @@ function App() {
     event.preventDefault();
     dropDepthRef.current = Math.max(0, dropDepthRef.current - 1);
     if (dropDepthRef.current === 0) resetDropState();
-  };
-
-  const importDroppedFile = async (dataTransfer: DataTransfer) => {
-    const files = [...dataTransfer.files];
-
-    if (files.length !== 1) {
-      setError({
-        title: 'Couldn’t import bookmarks',
-        detail: 'Drop one JSON file at a time.',
-      });
-      return;
-    }
-
-    const [file] = files;
-    if (!file.name.toLocaleLowerCase().endsWith('.json')) {
-      setError({
-        title: 'Couldn’t import bookmarks',
-        detail: 'Drop a file with a .json extension.',
-      });
-      return;
-    }
-
-    setError(null);
-    await importFile(file);
   };
 
   const addDroppedUrl = (
@@ -542,7 +1108,7 @@ function App() {
       pendingScrollBookmarkRef.current = bookmark;
       setActiveBookmark(bookmark);
       setKeyboardSelection(false);
-      setError(null);
+      if (!corruptBackup) setError(null);
     } else {
       setError(storageError('Couldn’t save URL'));
     }
@@ -552,7 +1118,7 @@ function App() {
     event: DragEvent<HTMLElement>,
     allowFiles: boolean,
   ) => {
-    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (isAnyModalVisible) return;
 
     if (Array.from(event.dataTransfer.types).includes(BOOKMARK_DRAG_TYPE)) {
       event.preventDefault();
@@ -570,16 +1136,47 @@ function App() {
     }
 
     const mode = detectDropMode(event.dataTransfer, allowFiles);
-    const hovered = allowFiles ? null : getHoveredDropSection(event.target);
-    const targetSection = allowFiles
+    const files = allowFiles ? Array.from(event.dataTransfer.files) : [];
+    if (!mode && files.length === 0) return;
+
+    const isEmptyState = bookmarks.length === 0;
+    const hovered = isEmptyState ? null : getHoveredDropSection(event.target);
+    const targetSection = isEmptyState
       ? 'Uncategorized'
       : resolveDropSection(hovered ?? urlDropSection, section);
     event.preventDefault();
     resetDropState();
 
-    if (mode === 'file') {
-      await importDroppedFile(event.dataTransfer);
-    } else if (mode === 'url') {
+    if (files.length > 0) {
+      const bookmarkFiles = files.filter(
+        (file) => isBookmarkFileName(file.name) || isBookmarkFileMime(file.type),
+      );
+      if (bookmarkFiles.length > 1) {
+        setError({
+          title: 'Couldn’t import bookmarks',
+          detail: 'Drop one JSON or HTML file at a time.',
+        });
+        return;
+      }
+      if (bookmarkFiles.length === 1 && files.length === 1) {
+        if (!corruptBackup) setError(null);
+        await importFile(bookmarkFiles[0]);
+        return;
+      }
+      if (readDroppedUrl(event.dataTransfer)) {
+        addDroppedUrl(event.dataTransfer, targetSection);
+        return;
+      }
+      setError({
+        title: 'Couldn’t import bookmarks',
+        detail: files.length > 1
+          ? 'Drop one JSON or HTML file at a time.'
+          : 'Drop a .json or .html bookmark file, or a webpage URL.',
+      });
+      return;
+    }
+
+    if (mode === 'url') {
       addDroppedUrl(event.dataTransfer, targetSection);
     }
   };
@@ -594,44 +1191,91 @@ function App() {
     setQuery(restored.query);
     setActiveBookmark(restored.activeBookmark);
     setKeyboardSelection(false);
-    setError(null);
+    if (!corruptBackup) setError(null);
   };
 
-  const saveBookmark = (nextBookmark: Bookmark): string | null => {
+  const saveBookmark = (
+    nextBookmark: Bookmark,
+    options?: { overwriteExternalConflict?: boolean },
+  ): string | null => {
+    const { blocked, conflictForBackup } = checkPreWriteConflict(
+      options?.overwriteExternalConflict,
+    );
+    if (blocked) return null;
+
     const editingBookmark = bookmarkDialog?.mode === 'edit'
       ? bookmarkDialog.bookmark
       : null;
+
+    let editingIndex = -1;
+    if (editingBookmark) {
+      editingIndex = bookmarks.indexOf(editingBookmark);
+      if (editingIndex < 0) {
+        const editingIdentity = urlIdentity(editingBookmark.url);
+        editingIndex = bookmarks.findIndex(
+          (item) => urlIdentity(item.url) === editingIdentity,
+        );
+      }
+    }
+    const resolvedEditing = editingIndex >= 0 ? bookmarks[editingIndex] : null;
+
     const bookmarkIdentity = urlIdentity(nextBookmark.url);
     const duplicate = bookmarks.find(
-      (bookmark) => bookmark !== editingBookmark
+      (bookmark, index) => index !== editingIndex
         && urlIdentity(bookmark.url) === bookmarkIdentity,
     );
     if (duplicate) return `“${duplicate.title}” already uses this URL.`;
 
     let nextBookmarks: Bookmark[];
-    if (editingBookmark) {
-      if (nextBookmark.section === editingBookmark.section) {
-        nextBookmarks = bookmarks.map((bookmark) =>
-          bookmark === editingBookmark ? nextBookmark : bookmark,
+    if (resolvedEditing) {
+      if (nextBookmark.section === resolvedEditing.section) {
+        nextBookmarks = bookmarks.map((bookmark, index) =>
+          index === editingIndex ? nextBookmark : bookmark,
         );
       } else {
-        const remaining = bookmarks.filter((bookmark) => bookmark !== editingBookmark);
+        const remaining = bookmarks.filter((_bookmark, index) => index !== editingIndex);
         nextBookmarks = insertBookmarkInSection(remaining, nextBookmark);
       }
     } else {
       nextBookmarks = insertBookmarkInSection(bookmarks, nextBookmark);
     }
 
-    if (persist(nextBookmarks, null)) {
+    const snapshotRequests: SnapshotRequest[] = [];
+    if (options?.overwriteExternalConflict && conflictForBackup) {
+      snapshotRequests.push({
+        trigger: 'external-conflict',
+        label: 'External tab changes before overwrite',
+        bookmarks: conflictForBackup.externalBookmarks,
+      });
+    }
+
+    const result = persistWithMeta(nextBookmarks, null, {
+      snapshots: snapshotRequests,
+    });
+    if (result.ok) {
       setSection(nextBookmark.section);
       setQuery('');
       setActiveBookmark(nextBookmark);
       setKeyboardSelection(false);
-      setError(null);
+      if (!corruptBackup) setError(null);
+      setExternalConflict(null);
       setBookmarkDialog(null);
+      restoreFocusSafely(modalTriggerRef.current);
+      if (options?.overwriteExternalConflict && conflictForBackup) {
+        setStatusToast({
+          title: 'Changes saved',
+          detail: 'External tab version backed up to History',
+        });
+      }
       return null;
     }
     return 'Browser storage is full, blocked, or unavailable.';
+  };
+
+  const cancelBookmarkDialog = () => {
+    setBookmarkDialog(null);
+    convergeFromDiskIfNeeded();
+    restoreFocusSafely(modalTriggerRef.current);
   };
 
   const deleteBookmark = (bookmarkToDelete: Bookmark) => {
@@ -653,14 +1297,17 @@ function App() {
       setSection(nextSection);
       setActiveBookmark(null);
       setKeyboardSelection(false);
-      setError(null);
+      if (!corruptBackup) setError(null);
       setBookmarkDialog(null);
     } else {
       setError(storageError('Couldn’t remove bookmark'));
     }
   };
 
-  const renameSection = (nextName: string): string | null => {
+  const renameSection = (
+    nextName: string,
+    options?: { overwriteExternalConflict?: boolean },
+  ): string | null => {
     if (!sectionDialog) return 'Section is no longer available.';
     const previousName = sectionDialog.section;
     if (!nextName) return 'Enter a section name.';
@@ -675,6 +1322,11 @@ function App() {
       return `“${conflictingSection}” already exists.`;
     }
 
+    const { blocked, conflictForBackup } = checkPreWriteConflict(
+      options?.overwriteExternalConflict,
+    );
+    if (blocked) return null;
+
     let nextActiveBookmark = activeBookmark;
     const nextBookmarks = bookmarks.map((bookmark) => {
       if (bookmark.section !== previousName) return bookmark;
@@ -683,12 +1335,32 @@ function App() {
       return renamed;
     });
 
-    if (persist(nextBookmarks, null)) {
+    const snapshotRequests: SnapshotRequest[] = [];
+    if (options?.overwriteExternalConflict && conflictForBackup) {
+      snapshotRequests.push({
+        trigger: 'external-conflict',
+        label: 'External tab changes before overwrite',
+        bookmarks: conflictForBackup.externalBookmarks,
+      });
+    }
+
+    const result = persistWithMeta(nextBookmarks, null, {
+      snapshots: snapshotRequests,
+    });
+    if (result.ok) {
       if (section === previousName) setSection(nextName);
       setActiveBookmark(nextActiveBookmark);
       setKeyboardSelection(false);
-      setError(null);
+      if (!corruptBackup) setError(null);
+      setExternalConflict(null);
       setSectionDialog(null);
+      restoreFocusSafely(modalTriggerRef.current);
+      if (options?.overwriteExternalConflict && conflictForBackup) {
+        setStatusToast({
+          title: 'Changes saved',
+          detail: 'External tab version backed up to History',
+        });
+      }
       return null;
     }
     return 'Browser storage is full, blocked, or unavailable.';
@@ -697,12 +1369,18 @@ function App() {
   const deleteSection = (
     strategy: 'move' | 'delete',
     destination?: string,
+    options?: { overwriteExternalConflict?: boolean },
   ): string | null => {
     if (!sectionDialog) return 'Section is no longer available.';
     const sectionToDelete = sectionDialog.section;
     if (strategy === 'move' && !destination) {
       return 'Choose a destination section.';
     }
+
+    const { blocked, conflictForBackup } = checkPreWriteConflict(
+      options?.overwriteExternalConflict,
+    );
+    if (blocked) return null;
 
     const affectedCount = sectionCounts.get(sectionToDelete) ?? 0;
     let nextActiveBookmark = activeBookmark;
@@ -719,25 +1397,58 @@ function App() {
         return false;
       });
 
-    if (persist(nextBookmarks, {
-      title: strategy === 'move' ? 'Section removed' : 'Section and bookmarks removed',
-      detail: strategy === 'move'
-        ? `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} moved to ${destination}.`
-        : `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} removed from ${sectionToDelete}.`,
-      section,
-      query,
-      activeBookmark,
-    })) {
+    const snapshotRequests: SnapshotRequest[] = [];
+    if (options?.overwriteExternalConflict && conflictForBackup) {
+      snapshotRequests.push({
+        trigger: 'external-conflict',
+        label: 'External tab changes before overwrite',
+        bookmarks: conflictForBackup.externalBookmarks,
+      });
+    }
+    snapshotRequests.push({
+      trigger: 'pre-section-delete',
+      label: `Before removing section “${sectionToDelete}”`,
+    });
+
+    const result = persistWithMeta(
+      nextBookmarks,
+      {
+        title: strategy === 'move' ? 'Section removed' : 'Section and bookmarks removed',
+        detail: strategy === 'move'
+          ? `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} moved to ${destination}.`
+          : `${affectedCount} bookmark${affectedCount === 1 ? '' : 's'} removed from ${sectionToDelete}.`,
+        section,
+        query,
+        activeBookmark,
+      },
+      { snapshots: snapshotRequests },
+    );
+
+    if (result.ok) {
       if (section === sectionToDelete) {
         setSection(strategy === 'move' ? destination! : 'All');
       }
       setActiveBookmark(nextActiveBookmark);
       setKeyboardSelection(false);
-      setError(null);
+      if (!corruptBackup) setError(null);
+      setExternalConflict(null);
       setSectionDialog(null);
+      restoreFocusSafely(modalTriggerRef.current);
+      if (options?.overwriteExternalConflict && conflictForBackup) {
+        setStatusToast({
+          title: 'Changes saved',
+          detail: 'External tab version backed up to History',
+        });
+      }
       return null;
     }
     return 'Browser storage is full, blocked, or unavailable.';
+  };
+
+  const cancelSectionDialog = () => {
+    setSectionDialog(null);
+    convergeFromDiskIfNeeded();
+    restoreFocusSafely(modalTriggerRef.current);
   };
 
   const copyBookmarkUrl = (bookmark: Bookmark) => {
@@ -786,19 +1497,14 @@ function App() {
   const closeContextMenu = (restoreFocus: boolean) => {
     setContextMenu(null);
     if (!restoreFocus) return;
-    const trigger = contextMenuTriggerRef.current;
-    if (trigger?.isConnected) {
-      window.requestAnimationFrame(() => {
-        if (trigger.isConnected) trigger.focus({ preventScroll: true });
-      });
-    }
+    restoreFocusSafely(contextMenuTriggerRef.current);
   };
 
   const handleElementContextMenu = (
     event: ReactMouseEvent<HTMLElement>,
     target: ContextMenuTarget,
   ) => {
-    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (isAnyModalVisible) return;
     event.preventDefault();
     event.stopPropagation();
     const isKeyboardCoords = event.clientX === 0 && event.clientY === 0;
@@ -818,7 +1524,7 @@ function App() {
     event: ReactKeyboardEvent<HTMLElement>,
     target: ContextMenuTarget,
   ) => {
-    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (isAnyModalVisible) return;
     if (
       event.key === 'ContextMenu'
       || (event.key === 'F10' && event.shiftKey)
@@ -877,45 +1583,103 @@ function App() {
   };
 
   const chooseFile = () => {
-    setError(null);
+    if (!corruptBackup) setError(null);
     resetDropState();
+    setExportMenuOpen(false);
     fileRef.current?.click();
   };
 
-  const exportBookmarks = () => {
-    const blob = new Blob([JSON.stringify(bookmarks, null, 2)], {
-      type: 'application/json',
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'bookmarks.json';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  const exportJson = () => {
+    closeExportMenu(true);
+    downloadTextFile(
+      'bookmarks.json',
+      JSON.stringify(bookmarks, null, 2),
+      'application/json',
+    );
+    setStatusToast({ title: 'Exported JSON', detail: 'bookmarks.json' });
+  };
+
+  const exportHtml = () => {
+    closeExportMenu(true);
+    downloadTextFile(
+      'bookmarks.html',
+      serializeBookmarksHtml(bookmarks),
+      'text/html;charset=utf-8',
+    );
+    setStatusToast({ title: 'Exported browser HTML', detail: 'bookmarks.html' });
+  };
+
+  const clearPendingEditorClose = () => {
+    if (editorCloseTimerRef.current !== null) {
+      window.clearTimeout(editorCloseTimerRef.current);
+      editorCloseTimerRef.current = null;
+    }
   };
 
   const openEditor = () => {
+    clearPendingEditorClose();
+    captureModalOpenContext();
+    captureEditBaseline(bookmarks);
+    setExportMenuOpen(false);
+    setEditorRepairMode(false);
     setEditorContent(JSON.stringify(bookmarks, null, 2));
     setEditorError(null);
     setEditorClosing(false);
     setEditorOpen(true);
   };
 
-  const closeEditor = () => {
-    if (editorClosing) return;
+  const openRepairBackup = () => {
+    if (!corruptBackup) return;
+    clearPendingEditorClose();
+    if (!snapshotDialog) {
+      captureModalOpenContext();
+    }
+    captureEditBaseline(bookmarks);
+    setSnapshotDialog(false);
+    setExportMenuOpen(false);
+    setEditorRepairMode(true);
+    setEditorContent(corruptBackup.raw);
+    let diagnostic: AppError | null = null;
+    try {
+      parseEditorBookmarks(corruptBackup.raw);
+    } catch (parseErr) {
+      diagnostic = formatBookmarkError(
+        parseErr,
+        corruptBackup.raw,
+        'Repair corrupt backup',
+      );
+    }
+    setEditorError(diagnostic);
+    setEditorClosing(false);
+    setEditorOpen(true);
+  };
+
+  const closeEditor = (shouldConverge = true) => {
+    if (editorClosing || !editorOpen) return;
     setEditorClosing(true);
-    window.setTimeout(() => {
+    if (shouldConverge) {
+      convergeFromDiskIfNeeded();
+    }
+    clearPendingEditorClose();
+    editorCloseTimerRef.current = window.setTimeout(() => {
+      editorCloseTimerRef.current = null;
       setEditorOpen(false);
       setEditorClosing(false);
+      setEditorRepairMode(false);
+      restoreFocusSafely(modalTriggerRef.current);
     }, 180);
   };
 
-  const saveEditor = () => {
+  useEffect(() => {
+    closeEditorRef.current = closeEditor;
+  });
+
+  const saveEditor = (overwriteExternalConflict = false) => {
+    if (!editorOpen || editorClosing) return;
+
     let nextBookmarks: Bookmark[];
     try {
-      nextBookmarks = parseBookmarks(editorContent);
+      nextBookmarks = parseEditorBookmarks(editorContent);
     } catch (saveError) {
       setEditorError(
         formatBookmarkError(saveError, editorContent, 'Couldn’t save changes'),
@@ -923,605 +1687,811 @@ function App() {
       return;
     }
 
-    try {
-      applyBookmarks(nextBookmarks);
-      closeEditor();
+    const { blocked, conflictForBackup } = checkPreWriteConflict(
+      overwriteExternalConflict,
+    );
+    if (blocked) return;
+
+    const nextHash = computeBookmarksHash(nextBookmarks);
+    const currentHash = computeBookmarksHash(bookmarks);
+    if (nextHash === currentHash && !editorRepairMode && !overwriteExternalConflict) {
       setEditorError(null);
-    } catch {
+      closeEditor(false);
+      return;
+    }
+
+    const snapshotRequests: SnapshotRequest[] = [];
+    if (overwriteExternalConflict && conflictForBackup) {
+      snapshotRequests.push({
+        trigger: 'external-conflict',
+        label: 'External tab changes before overwrite',
+        bookmarks: conflictForBackup.externalBookmarks,
+      });
+    }
+    if (bookmarks.length > 0) {
+      snapshotRequests.push({
+        trigger: 'pre-editor-save',
+        label: 'Before JSON edit',
+      });
+    }
+
+    const result = persistWithMeta(nextBookmarks, null, {
+      snapshots: snapshotRequests,
+      clearCorruptBackup: editorRepairMode,
+    });
+    if (!result.ok) {
       setEditorError(storageError('Couldn’t save changes'));
+      return;
+    }
+
+    const repaired = editorRepairMode;
+    setSection('All');
+    setQuery('');
+    setActiveBookmark(nextBookmarks[0] ?? null);
+    setKeyboardSelection(false);
+    if (repaired || !corruptBackup) setError(null);
+    setExternalConflict(null);
+    setEditorError(null);
+    closeEditor(false);
+
+    if (overwriteExternalConflict && conflictForBackup) {
+      setStatusToast({
+        title: 'Changes saved',
+        detail: 'External tab version backed up to History',
+      });
+    } else if (repaired) {
+      setStatusToast({
+        title: 'Backup repaired',
+        detail: `${nextBookmarks.length} bookmark${nextBookmarks.length === 1 ? '' : 's'} restored`,
+      });
     }
   };
 
-  if (!bookmarks.length) {
-    const dropActive = dropMode !== null;
-    const dropHeading = dropMode === 'url' ? URL_DROP_HEADING : DROP_HEADING;
-    const dropCopy = dropMode === 'url' ? URL_DROP_COPY : DROP_COPY;
+  const handleRestoreSnapshot = (snapshot: BookmarkSnapshot): string | null => {
+    const nextBookmarks = snapshot.bookmarks.map(cloneBookmark);
+    const snapshotRequests: SnapshotRequest[] = bookmarks.length > 0
+      ? [{ trigger: 'pre-restore', label: `Before restoring “${snapshot.label}”` }]
+      : [];
 
-    return (
-      <main
-        className={`app-empty app-page${dropActive ? ' is-drop-active' : ''}`}
-        onDragEnter={(event) => handleDragEnter(event, true)}
-        onDragOver={(event) => handleDragOver(event, true)}
-        onDragLeave={handleDragLeave}
-        onDrop={(event) => { void handlePageDrop(event, true); }}
-      >
-        <section className="app-empty-panel">
-          <div className="app-empty-brand">
-            <img src={icon} alt="" className="app-empty-mark" />
-          </div>
-          <div aria-live="polite">
-            <h1>
-              <TypewriterText
-                text={dropActive ? dropHeading : EMPTY_HEADING}
-                reserve={EMPTY_HEADING}
-              />
-            </h1>
-            <p className="app-empty-copy">
-              <TypewriterText
-                text={dropActive ? dropCopy : EMPTY_COPY}
-                reserve={DROP_COPY}
-                codeToken="bookmarks.json"
-              />
-            </p>
-          </div>
-          <input
-            ref={fileRef}
-            type="file"
-            accept="application/json,.json"
-            hidden
-            onChange={handleFile}
-          />
-          <div
-            className={`app-empty-action${dropActive ? ' is-transparent' : ''}`}
-            aria-hidden={dropActive}
-            style={{ transitionDuration: `${TYPEWRITER_DURATION}ms` }}
-          >
-            <button
-              type="button"
-              className="app-load-button"
-              tabIndex={dropActive ? -1 : undefined}
-              onClick={chooseFile}
-            >
-              Choose JSON file
-              <span className="app-load-arrow" aria-hidden="true">↗</span>
-            </button>
-            <button
-              type="button"
-              className="app-load-button"
-              tabIndex={dropActive ? -1 : undefined}
-              onClick={() => setBookmarkDialog({
-                mode: 'add',
-                initialSection: 'Uncategorized',
-              })}
-            >
-              Add manually
-              <span className="app-load-arrow" aria-hidden="true">＋</span>
-            </button>
-          </div>
-          {error && (
-            <ErrorNotice
-              error={error}
-              onDismiss={() => setError(null)}
-              className="app-file-error"
-            />
-          )}
-        </section>
-        {bookmarkDialog?.mode === 'add' && (
-          <BookmarkDialog
-            initialSection={bookmarkDialog.initialSection}
-            sections={[]}
-            onCancel={() => setBookmarkDialog(null)}
-            onSave={saveBookmark}
-          />
-        )}
-        {(undoState || statusToast) && (
-          <div className="app-toast-stack">
-            {undoState && <UndoNotice undo={undoState} onUndo={undoLastChange} />}
-            {statusToast && (
-              <div className="app-status-toast" role="status">
-                <div>
-                  <strong>{statusToast.title}</strong>
-                  {statusToast.detail && <small>{statusToast.detail}</small>}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </main>
-    );
-  }
+    const result = persistWithMeta(nextBookmarks, null, {
+      snapshots: snapshotRequests,
+    });
+    if (!result.ok) {
+      return 'Browser storage is full, blocked, or unavailable. Existing bookmarks were not changed.';
+    }
 
+    setSection('All');
+    setQuery('');
+    setActiveBookmark(nextBookmarks[0] ?? null);
+    setKeyboardSelection(false);
+    if (!corruptBackup) setError(null);
+    closeSnapshotDialog();
+    setStatusToast({
+      title: 'Snapshot restored',
+      detail: snapshot.label,
+    });
+    return null;
+  };
+
+  const handleCreateCheckpoint = (label: string): string | null => {
+    const result = createCheckpoint(label);
+    if (!result.ok) {
+      return result.status === 'skipped-empty'
+        ? 'Add bookmarks before saving a checkpoint.'
+        : 'Browser storage is full, blocked, or unavailable.';
+    }
+    setStatusToast({
+      title: result.status === 'upgraded' ? 'Checkpoint updated' : 'Checkpoint saved',
+      detail: label.trim() || 'Manual checkpoint',
+    });
+    return null;
+  };
+
+  const handleDeleteSnapshot = (snapshotId: string): string | null => {
+    const ok = deleteSnapshot(snapshotId);
+    if (!ok) {
+      return 'Could not delete snapshot from browser storage.';
+    }
+    return null;
+  };
+
+  const handleDismissCorruptBackup = () => {
+    dismissCorruptBackup();
+    setError(null);
+    setStatusToast({ title: 'Corrupt backup dismissed' });
+  };
+
+  const dropActive = dropMode !== null;
+  const dropHeading = dropMode === 'url' ? URL_DROP_HEADING : DROP_HEADING;
+  const dropCopy = dropMode === 'url' ? URL_DROP_COPY : DROP_COPY;
   const activeUrlDropSection = dropMode === 'url'
     ? resolveDropSection(urlDropSection, section)
     : null;
 
   return (
-    <div
-      className="app-shell app-page"
-      onDragEnter={(event) => handleDragEnter(event, false)}
-      onDragOver={(event) => handleDragOver(event, false)}
-      onDragLeave={handleDragLeave}
-      onDrop={(event) => { void handlePageDrop(event, false); }}
-    >
-      <aside className="app-sidebar">
-        <a href="/" className="app-brand" aria-label="Reload new tab page">
-          <img src={icon} alt="" />
-          <span>
-            <strong>Index</strong>
-            <small>Personal atlas</small>
-          </span>
-        </a>
+    <div className="app-page">
+      <input
+        ref={fileRef}
+        type="file"
+        accept="application/json,text/html,.json,.html,.htm"
+        hidden
+        onChange={handleFile}
+      />
 
-        <p className="app-nav-label">Directory</p>
-        <nav className="app-section-nav" aria-label="Bookmark sections">
-          <button
-            className={section === 'All' ? 'is-active' : ''}
-            aria-pressed={section === 'All'}
-            onClick={() => {
-              setSection('All');
-              setActiveBookmark(null);
-              setKeyboardSelection(false);
-            }}
-          >
-            <span>Everything</span><small>{bookmarks.length}</small>
-          </button>
-          {[...sectionCounts].map(([name, count], index) => (
-            <button
-              key={name}
-              draggable
-              data-drop-section={name}
-              style={{ animationDelay: `${(index + 1) * 55}ms` }}
-              className={`${section === name ? 'is-active' : ''}${
-                draggedSection === name ? ' is-dragging' : ''
-              }${
-                dragTarget?.name === name
-                  ? ` is-drop-${dragTarget.position}`
-                  : ''
-              }${
-                activeUrlDropSection === name ? ' is-url-drop-target' : ''
-              }${
-                bookmarkDropSection === name ? ' is-bookmark-drop-target' : ''
-              }`}
-              aria-pressed={section === name}
-              title="Drag to reorder"
-              onDragStart={(event) => {
-                if (contextMenu) setContextMenu(null);
-                event.dataTransfer.effectAllowed = 'move';
-                event.dataTransfer.setData(SECTION_DRAG_TYPE, name);
-                event.dataTransfer.setData('text/plain', name);
-                setDraggedSection(name);
-              }}
-              onDragOver={(event) => {
-                if (Array.from(event.dataTransfer.types).includes(SECTION_DRAG_TYPE)) {
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = 'move';
-                  const bounds = event.currentTarget.getBoundingClientRect();
-                  setDragTarget({
-                    name,
-                    position: event.clientY < bounds.top + bounds.height / 2
-                      ? 'before'
-                      : 'after',
-                  });
-                  return;
-                }
-
-                const dragged = draggedBookmarkRef.current;
-                if (dragged && dragged.section !== name) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  event.dataTransfer.dropEffect = 'move';
-                  updateBookmarkDropTarget(null);
-                  updateBookmarkDropSection(name);
-                }
-              }}
-              onDrop={(event) => {
-                const source = event.dataTransfer.getData(SECTION_DRAG_TYPE);
-                if (source) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  if (dragTarget) {
-                    reorderSection(source, name, dragTarget.position);
-                  }
-                  setDraggedSection(null);
-                  setDragTarget(null);
-                }
-              }}
-              onDragEnd={() => {
-                setDraggedSection(null);
-                setDragTarget(null);
-              }}
-              onContextMenu={(event) =>
-                handleElementContextMenu(event, { kind: 'section', section: name })}
-              onKeyDown={(event) =>
-                handleElementContextKeyDown(event, { kind: 'section', section: name })}
-              onClick={() => {
-                setSection(name);
-                setActiveBookmark(null);
-                setKeyboardSelection(false);
-              }}
+      {bookmarks.length === 0 ? (
+        <main
+          className={`app-empty${dropActive ? ' is-drop-active' : ''}`}
+          onDragEnter={(event) => handleDragEnter(event, true)}
+          onDragOver={(event) => handleDragOver(event, true)}
+          onDragLeave={handleDragLeave}
+          onDrop={(event) => { void handlePageDrop(event, true); }}
+        >
+          <section className="app-empty-panel">
+            <div className="app-empty-brand">
+              <img src={icon} alt="" className="app-empty-mark" />
+            </div>
+            <div aria-live="polite">
+              <h1>
+                <TypewriterText
+                  text={dropActive ? dropHeading : EMPTY_HEADING}
+                  reserve={EMPTY_HEADING}
+                />
+              </h1>
+              <p className="app-empty-copy">
+                <TypewriterText
+                  text={dropActive ? dropCopy : EMPTY_COPY}
+                  reserve={EMPTY_COPY}
+                  codeToken="bookmarks.json"
+                />
+              </p>
+            </div>
+            <div
+              className={`app-empty-action${dropActive ? ' is-transparent' : ''}`}
+              aria-hidden={dropActive}
+              style={{ transitionDuration: `${TYPEWRITER_DURATION}ms` }}
             >
-              <span>{name}</span><small>{count}</small>
-            </button>
-          ))}
-        </nav>
-
-        {section !== 'All' && sectionCounts.has(section) && (
-          <div className="app-section-actions">
-            <span>{section}</span>
-            <button
-              type="button"
-              onClick={() => setSectionDialog({ mode: 'rename', section })}
-            >
-              Rename
-            </button>
-            <button
-              type="button"
-              onClick={() => setSectionDialog({ mode: 'delete', section })}
-            >
-              Remove
-            </button>
-          </div>
-        )}
-
-        {error && (
-          <ErrorNotice
-            error={error}
-            onDismiss={() => setError(null)}
-            className="app-sidebar-error"
-          />
-        )}
-
-        <div className="app-data-actions">
-          <input
-            ref={fileRef}
-            type="file"
-            accept="application/json,.json"
-            hidden
-            onChange={handleFile}
-          />
-          <button type="button" onClick={chooseFile}>
-            Import
-          </button>
-          <button type="button" onClick={exportBookmarks}>
-            Export
-          </button>
-          <button type="button" onClick={openEditor}>
-            Edit JSON
-          </button>
-        </div>
-
-      </aside>
-
-      <main className="app-main">
-        <header className="app-header">
-          <div>
-            <p className="app-kicker">Personal directory</p>
-            <h1>{section === 'All' ? 'Everything' : section}</h1>
-          </div>
-          <div className="app-header-tools">
-            {inspected && (
-              <div className="app-compact-bookmark-actions">
+              <button
+                type="button"
+                className="app-load-button"
+                tabIndex={dropActive ? -1 : undefined}
+                onClick={chooseFile}
+              >
+                Choose JSON or HTML
+                <span className="app-load-arrow" aria-hidden="true">↗</span>
+              </button>
+              <button
+                type="button"
+                className="app-load-button"
+                tabIndex={dropActive ? -1 : undefined}
+                onClick={() => openBookmarkDialog({
+                  mode: 'add',
+                  initialSection: 'Uncategorized',
+                })}
+              >
+                Add manually
+                <span className="app-load-arrow" aria-hidden="true">＋</span>
+              </button>
+              {(snapshots.length > 0 || corruptBackup !== null) && (
                 <button
                   type="button"
-                  onClick={() => setBookmarkDialog({
-                    mode: 'edit',
-                    bookmark: inspected,
-                  })}
+                  className={`app-load-button${corruptBackup ? ' has-rescue-dot' : ''}`}
+                  tabIndex={dropActive ? -1 : undefined}
+                  onClick={openSnapshotDialog}
                 >
-                  Edit
+                  History{snapshots.length > 0 ? ` (${snapshots.length})` : ''}
                 </button>
-                <button type="button" onClick={() => deleteBookmark(inspected)}>
-                  Delete
+              )}
+            </div>
+            {error && (
+              <ErrorNotice
+                error={error}
+                onDismiss={() => setError(null)}
+                action={corruptBackup
+                  ? { label: 'Repair backup', onClick: openRepairBackup }
+                  : undefined}
+                className="app-file-error"
+              />
+            )}
+          </section>
+        </main>
+      ) : (
+        <div
+          className="app-shell"
+          onDragEnter={(event) => handleDragEnter(event, true)}
+          onDragOver={(event) => handleDragOver(event, true)}
+          onDragLeave={handleDragLeave}
+          onDrop={(event) => { void handlePageDrop(event, true); }}
+        >
+          <aside className="app-sidebar">
+            <a href="/" className="app-brand" aria-label="Reload new tab page">
+              <img src={icon} alt="" />
+              <span>
+                <strong>Index</strong>
+                <small>Personal atlas</small>
+              </span>
+            </a>
+
+            <p className="app-nav-label">Directory</p>
+            <nav className="app-section-nav" aria-label="Bookmark sections">
+              <button
+                className={section === 'All' ? 'is-active' : ''}
+                aria-pressed={section === 'All'}
+                onClick={() => {
+                  setSection('All');
+                  setActiveBookmark(null);
+                  setKeyboardSelection(false);
+                }}
+              >
+                <span>Everything</span><small>{bookmarks.length}</small>
+              </button>
+              {[...sectionCounts].map(([name, count], index) => (
+                <button
+                  key={name}
+                  draggable
+                  data-drop-section={name}
+                  style={{ animationDelay: `${(index + 1) * 55}ms` }}
+                  className={`${section === name ? 'is-active' : ''}${
+                    draggedSection === name ? ' is-dragging' : ''
+                  }${
+                    dragTarget?.name === name
+                      ? ` is-drop-${dragTarget.position}`
+                      : ''
+                  }${
+                    activeUrlDropSection === name ? ' is-url-drop-target' : ''
+                  }${
+                    bookmarkDropSection === name ? ' is-bookmark-drop-target' : ''
+                  }`}
+                  aria-pressed={section === name}
+                  title="Drag to reorder"
+                  onDragStart={(event) => {
+                    if (contextMenu) setContextMenu(null);
+                    if (exportMenuOpen) setExportMenuOpen(false);
+                    event.dataTransfer.effectAllowed = 'move';
+                    event.dataTransfer.setData(SECTION_DRAG_TYPE, name);
+                    event.dataTransfer.setData('text/plain', name);
+                    setDraggedSection(name);
+                  }}
+                  onDragOver={(event) => {
+                    if (Array.from(event.dataTransfer.types).includes(SECTION_DRAG_TYPE)) {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = 'move';
+                      const bounds = event.currentTarget.getBoundingClientRect();
+                      setDragTarget({
+                        name,
+                        position: event.clientY < bounds.top + bounds.height / 2
+                          ? 'before'
+                          : 'after',
+                      });
+                      return;
+                    }
+
+                    const dragged = draggedBookmarkRef.current;
+                    if (dragged && dragged.section !== name) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      event.dataTransfer.dropEffect = 'move';
+                      updateBookmarkDropTarget(null);
+                      updateBookmarkDropSection(name);
+                    }
+                  }}
+                  onDrop={(event) => {
+                    const source = event.dataTransfer.getData(SECTION_DRAG_TYPE);
+                    if (source) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      if (dragTarget) {
+                        reorderSection(source, name, dragTarget.position);
+                      }
+                      setDraggedSection(null);
+                      setDragTarget(null);
+                    }
+                  }}
+                  onDragEnd={() => {
+                    setDraggedSection(null);
+                    setDragTarget(null);
+                  }}
+                  onContextMenu={(event) =>
+                    handleElementContextMenu(event, { kind: 'section', section: name })}
+                  onKeyDown={(event) =>
+                    handleElementContextKeyDown(event, { kind: 'section', section: name })}
+                  onClick={() => {
+                    setSection(name);
+                    setActiveBookmark(null);
+                    setKeyboardSelection(false);
+                  }}
+                >
+                  <span>{name}</span><small>{count}</small>
+                </button>
+              ))}
+            </nav>
+
+            {section !== 'All' && sectionCounts.has(section) && (
+              <div className="app-section-actions">
+                <span>{section}</span>
+                <button
+                  type="button"
+                  onClick={() => openSectionDialog({ mode: 'rename', section })}
+                >
+                  Rename
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openSectionDialog({ mode: 'delete', section })}
+                >
+                  Remove
                 </button>
               </div>
             )}
-            <button
-              type="button"
-              className="app-add-bookmark"
-              aria-label="Add bookmark"
-              title="Add bookmark (+)"
-              onClick={() => setBookmarkDialog({
-                mode: 'add',
-                initialSection: section === 'All' ? 'Uncategorized' : section,
-              })}
-            >
-              <span className="app-add-label" aria-hidden="true">Add</span>
-              <span className="app-add-symbol" aria-hidden="true">+</span>
-            </button>
-            <div className={`app-search-wrap${searchOpen ? ' is-open' : ''}`}>
+
+            {error && (
+              <ErrorNotice
+                error={error}
+                onDismiss={() => setError(null)}
+                action={corruptBackup
+                  ? { label: 'Repair backup', onClick: openRepairBackup }
+                  : undefined}
+                className="app-sidebar-error"
+              />
+            )}
+
+            <div className="app-data-actions">
+              <button type="button" onClick={chooseFile}>
+                Import
+              </button>
+              <button
+                ref={exportButtonRef}
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={exportMenuOpen}
+                onClick={() => setExportMenuOpen((open) => !open)}
+              >
+                Export
+              </button>
+              <button type="button" onClick={openEditor}>
+                Edit JSON
+              </button>
               <button
                 type="button"
-                className="app-search-trigger"
-                aria-label={searchOpen ? 'Focus search' : 'Open search'}
-                title="Search (/)"
-                onClick={() => {
-                  setSearchOpen(true);
-                  window.requestAnimationFrame(() => searchRef.current?.focus());
-                }}
+                title="History (h)"
+                className={corruptBackup ? 'has-rescue-dot' : undefined}
+                onClick={openSnapshotDialog}
               >
-                <span className="app-search-hover-label" aria-hidden="true">
-                  Search
-                </span>
-                <span className="app-search-symbol" aria-hidden="true">/</span>
+                History
               </button>
-              <label className="app-search">
-                <input
-                  ref={searchRef}
-                  value={query}
-                  onBlur={() => {
-                    if (!query) setSearchOpen(false);
-                  }}
-                  onChange={(event) => {
-                    setQuery(event.target.value);
-                    setActiveBookmark(null);
-                    setKeyboardSelection(true);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'ArrowDown') {
-                      event.preventDefault();
-                      selectRelativeBookmark(1);
-                    } else if (event.key === 'ArrowUp') {
-                      event.preventDefault();
-                      selectRelativeBookmark(-1);
-                    } else if (event.key === 'Enter' && inspected) {
-                      event.preventDefault();
-                      const destination = normalizeUrl(inspected.url);
-                      if (event.ctrlKey || event.metaKey) {
-                        window.open(destination, '_blank', 'noopener,noreferrer');
-                      } else {
-                        window.location.assign(destination);
-                      }
-                    } else if (event.key === 'Escape') {
-                      setQuery('');
-                      setSearchOpen(false);
-                      searchRef.current?.blur();
-                    }
-                  }}
-                  placeholder="Find anything…"
-                  aria-label="Search bookmarks"
-                />
-                <small>{matches.length}</small>
-              </label>
             </div>
-          </div>
-        </header>
+          </aside>
 
-        <div key={section} className="app-directory">
-          {[...groupedMatches].map(([sectionName, items]) => {
-            const seenKeys = new Map<string, number>();
-            return (
-              <section
-                key={sectionName}
-                data-drop-section={sectionName}
-                className={`app-group${
-                  activeUrlDropSection === sectionName ? ' is-url-drop-target' : ''
-                }${
-                  bookmarkDropSection === sectionName ? ' is-bookmark-drop-target' : ''
-                }`}
-                onDragOver={(event) => {
-                  const dragged = draggedBookmarkRef.current;
-                  if (dragged && dragged.section !== sectionName) {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    event.dataTransfer.dropEffect = 'move';
-                    updateBookmarkDropTarget(null);
-                    updateBookmarkDropSection(sectionName);
-                  }
-                }}
-              >
-                <div
-                  className="app-group-heading"
-                  data-section-heading={sectionName}
-                  onContextMenu={(event) =>
-                    handleElementContextMenu(event, {
-                      kind: 'section',
-                      section: sectionName,
-                    })}
-                >
-                  <h2>{sectionName}</h2>
-                  <span>{String(items.length).padStart(2, '0')}</span>
-                </div>
-                <div className="app-bookmark-list">
-                  {items.map((bookmark) => {
-                    const bookmarkIndex = matchIndices.get(bookmark) ?? -1;
-                    const baseKey = `${bookmark.url}-${bookmark.title}`;
-                    const occurrence = seenKeys.get(baseKey) ?? 0;
-                    seenKeys.set(baseKey, occurrence + 1);
-                    const key = occurrence === 0 ? baseKey : `${baseKey}-${occurrence}`;
-                    const dropClass = bookmarkDropTarget?.bookmark === bookmark
-                      ? ` is-drop-${bookmarkDropTarget.position}`
-                      : '';
-                    return (
-                      <a
-                        key={key}
-                        draggable
-                        href={normalizeUrl(bookmark.url)}
-                        data-app-bookmark-index={bookmarkIndex}
-                        className={`app-bookmark${
-                          bookmark === inspected
-                            ? ` is-current${keyboardSelection ? ' is-keyboard-current' : ''}`
-                            : ''
-                        }${
-                          draggedBookmark === bookmark ? ' is-dragging' : ''
-                        }${dropClass}`}
-                        onMouseEnter={() => {
-                          setKeyboardSelection(false);
-                          setActiveBookmark(bookmark);
-                        }}
-                        onFocus={() => {
-                          setKeyboardSelection(true);
-                          setActiveBookmark(bookmark);
-                        }}
-                        onDragStart={(event) => {
-                          if (contextMenu) setContextMenu(null);
-                          event.dataTransfer.effectAllowed = 'copyMove';
-                          event.dataTransfer.setData(BOOKMARK_DRAG_TYPE, '1');
-                          event.dataTransfer.setData(
-                            'text/uri-list',
-                            normalizeUrl(bookmark.url),
-                          );
-                          event.dataTransfer.setData(
-                            'text/plain',
-                            normalizeUrl(bookmark.url),
-                          );
-                          draggedBookmarkRef.current = bookmark;
-                          setDraggedBookmark(bookmark);
-                        }}
-                        onDragOver={(event) => {
-                          const source = draggedBookmarkRef.current;
-                          if (!source || query.trim()) return;
-                          const position = getBookmarkDropPosition(
-                            event,
-                            event.currentTarget,
-                          );
-                          if (
-                            reorderBookmark(bookmarks, source, bookmark, position)
-                            === bookmarks
-                          ) {
-                            return;
-                          }
-                          event.preventDefault();
-                          event.stopPropagation();
-                          event.dataTransfer.dropEffect = 'move';
-                          updateBookmarkDropSection(null);
-                          updateBookmarkDropTarget({ bookmark, position });
-                        }}
-                        onDragEnd={resetBookmarkDragState}
-                        onContextMenu={(event) =>
-                          handleElementContextMenu(event, {
-                            kind: 'bookmark',
-                            bookmark,
-                          })}
-                        onKeyDown={(event) =>
-                          handleElementContextKeyDown(event, {
-                            kind: 'bookmark',
-                            bookmark,
-                          })}
-                      >
-                        <img
-                          src={bookmark.iconUrl || getFaviconUrl(bookmark.url, 64)}
-                          alt=""
-                          draggable={false}
-                        />
-                        <span className="app-bookmark-copy">
-                          <strong>{bookmark.title}</strong>
-                          <small>
-                            {bookmark.subsection || bookmark.description || bookmark.product || bookmark.url}
-                          </small>
-                        </span>
-                        <span className="app-bookmark-tail">
-                          {bookmark.tier && (
-                            <em
-                              className="app-tier"
-                              data-tier={tierRank(bookmark.tier)}
-                            >
-                              {bookmark.tier}
-                            </em>
-                          )}
-                          <b aria-hidden="true">↗</b>
-                        </span>
-                      </a>
-                    );
+          <main className="app-main">
+            <header className="app-header">
+              <div>
+                <p className="app-kicker">Personal directory</p>
+                <h1>{section === 'All' ? 'Everything' : section}</h1>
+              </div>
+              <div className="app-header-tools">
+                {inspected && (
+                  <div className="app-compact-bookmark-actions">
+                    <button
+                      type="button"
+                      onClick={() => openBookmarkDialog({
+                        mode: 'edit',
+                        bookmark: inspected,
+                      })}
+                    >
+                      Edit
+                    </button>
+                    <button type="button" onClick={() => deleteBookmark(inspected)}>
+                      Delete
+                    </button>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  className="app-add-bookmark"
+                  aria-label="Add bookmark"
+                  title="Add bookmark (+)"
+                  onClick={() => openBookmarkDialog({
+                    mode: 'add',
+                    initialSection: section === 'All' ? 'Uncategorized' : section,
                   })}
+                >
+                  <span className="app-add-label" aria-hidden="true">Add</span>
+                  <span className="app-add-symbol" aria-hidden="true">+</span>
+                </button>
+                <div className={`app-search-wrap${searchOpen ? ' is-open' : ''}`}>
+                  <button
+                    type="button"
+                    className="app-search-trigger"
+                    aria-label={searchOpen ? 'Focus search' : 'Open search'}
+                    title="Search (/)"
+                    onClick={() => {
+                      setSearchOpen(true);
+                      window.requestAnimationFrame(() => searchRef.current?.focus());
+                    }}
+                  >
+                    <span className="app-search-hover-label" aria-hidden="true">
+                      Search
+                    </span>
+                    <span className="app-search-symbol" aria-hidden="true">/</span>
+                  </button>
+                  <label className="app-search">
+                    <input
+                      ref={searchRef}
+                      value={query}
+                      onBlur={() => {
+                        if (!query) setSearchOpen(false);
+                      }}
+                      onChange={(event) => {
+                        setQuery(event.target.value);
+                        setActiveBookmark(null);
+                        setKeyboardSelection(true);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'ArrowDown') {
+                          event.preventDefault();
+                          selectRelativeBookmark(1);
+                        } else if (event.key === 'ArrowUp') {
+                          event.preventDefault();
+                          selectRelativeBookmark(-1);
+                        } else if (event.key === 'Enter' && inspected) {
+                          event.preventDefault();
+                          const destination = normalizeUrl(inspected.url);
+                          if (event.ctrlKey || event.metaKey) {
+                            window.open(destination, '_blank', 'noopener,noreferrer');
+                          } else {
+                            window.location.assign(destination);
+                          }
+                        } else if (event.key === 'Escape') {
+                          setQuery('');
+                          setSearchOpen(false);
+                          searchRef.current?.blur();
+                        }
+                      }}
+                      placeholder="Find anything…"
+                      aria-label="Search bookmarks"
+                    />
+                    <small>{matches.length}</small>
+                  </label>
                 </div>
-              </section>
-            );
-          })}
+              </div>
+            </header>
 
-          {!matches.length && (
-            <div className="app-no-results">
-              <span>00</span>
-              <h2>No destination found.</h2>
-              <button onClick={() => { setQuery(''); setSection('All'); }}>
-                Reset search
-              </button>
+            <div key={section} className="app-directory">
+              {[...groupedMatches].map(([sectionName, items]) => {
+                const seenKeys = new Map<string, number>();
+                return (
+                  <section
+                    key={sectionName}
+                    data-drop-section={sectionName}
+                    className={`app-group${
+                      activeUrlDropSection === sectionName ? ' is-url-drop-target' : ''
+                    }${
+                      bookmarkDropSection === sectionName ? ' is-bookmark-drop-target' : ''
+                    }`}
+                    onDragOver={(event) => {
+                      const dragged = draggedBookmarkRef.current;
+                      if (dragged && dragged.section !== sectionName) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        event.dataTransfer.dropEffect = 'move';
+                        updateBookmarkDropTarget(null);
+                        updateBookmarkDropSection(sectionName);
+                      }
+                    }}
+                  >
+                    <div
+                      className="app-group-heading"
+                      data-section-heading={sectionName}
+                      onContextMenu={(event) =>
+                        handleElementContextMenu(event, {
+                          kind: 'section',
+                          section: sectionName,
+                        })}
+                    >
+                      <h2>{sectionName}</h2>
+                      <span>{String(items.length).padStart(2, '0')}</span>
+                    </div>
+                    <div className="app-bookmark-list">
+                      {items.map((bookmark) => {
+                        const bookmarkIndex = matchIndices.get(bookmark) ?? -1;
+                        const baseKey = `${bookmark.url}-${bookmark.title}`;
+                        const occurrence = seenKeys.get(baseKey) ?? 0;
+                        seenKeys.set(baseKey, occurrence + 1);
+                        const key = occurrence === 0 ? baseKey : `${baseKey}-${occurrence}`;
+                        const dropClass = bookmarkDropTarget?.bookmark === bookmark
+                          ? ` is-drop-${bookmarkDropTarget.position}`
+                          : '';
+                        return (
+                          <a
+                            key={key}
+                            draggable
+                            href={normalizeUrl(bookmark.url)}
+                            data-app-bookmark-index={bookmarkIndex}
+                            className={`app-bookmark${
+                              bookmark === inspected
+                                ? ` is-current${keyboardSelection ? ' is-keyboard-current' : ''}`
+                                : ''
+                            }${
+                              draggedBookmark === bookmark ? ' is-dragging' : ''
+                            }${dropClass}`}
+                            onMouseEnter={() => {
+                              setKeyboardSelection(false);
+                              setActiveBookmark(bookmark);
+                            }}
+                            onFocus={() => {
+                              setKeyboardSelection(true);
+                              setActiveBookmark(bookmark);
+                            }}
+                            onDragStart={(event) => {
+                              if (contextMenu) setContextMenu(null);
+                              if (exportMenuOpen) setExportMenuOpen(false);
+                              event.dataTransfer.effectAllowed = 'copyMove';
+                              event.dataTransfer.setData(BOOKMARK_DRAG_TYPE, '1');
+                              event.dataTransfer.setData(
+                                'text/uri-list',
+                                normalizeUrl(bookmark.url),
+                              );
+                              event.dataTransfer.setData(
+                                'text/plain',
+                                normalizeUrl(bookmark.url),
+                              );
+                              draggedBookmarkRef.current = bookmark;
+                              setDraggedBookmark(bookmark);
+                            }}
+                            onDragOver={(event) => {
+                              const source = draggedBookmarkRef.current;
+                              if (!source || query.trim()) return;
+                              const position = getBookmarkDropPosition(
+                                event,
+                                event.currentTarget,
+                              );
+                              if (
+                                reorderBookmark(bookmarks, source, bookmark, position)
+                                === bookmarks
+                              ) {
+                                return;
+                              }
+                              event.preventDefault();
+                              event.stopPropagation();
+                              event.dataTransfer.dropEffect = 'move';
+                              updateBookmarkDropSection(null);
+                              updateBookmarkDropTarget({ bookmark, position });
+                            }}
+                            onDragEnd={resetBookmarkDragState}
+                            onContextMenu={(event) =>
+                              handleElementContextMenu(event, {
+                                kind: 'bookmark',
+                                bookmark,
+                              })}
+                            onKeyDown={(event) =>
+                              handleElementContextKeyDown(event, {
+                                kind: 'bookmark',
+                                bookmark,
+                              })}
+                          >
+                            <img
+                              src={bookmark.iconUrl || getFaviconUrl(bookmark.url, 64)}
+                              alt=""
+                              draggable={false}
+                            />
+                            <span className="app-bookmark-copy">
+                              <strong>{bookmark.title}</strong>
+                              <small>
+                                {bookmark.subsection || bookmark.description || bookmark.product || bookmark.url}
+                              </small>
+                            </span>
+                            <span className="app-bookmark-tail">
+                              {bookmark.tier && (
+                                <em
+                                  className="app-tier"
+                                  data-tier={tierRank(bookmark.tier)}
+                                >
+                                  {bookmark.tier}
+                                </em>
+                              )}
+                              <b aria-hidden="true">↗</b>
+                            </span>
+                          </a>
+                        );
+                      })}
+                    </div>
+                  </section>
+                );
+              })}
+
+              {!matches.length && (
+                <div className="app-no-results">
+                  <span>00</span>
+                  <h2>No destination found.</h2>
+                  <button onClick={() => { setQuery(''); setSection('All'); }}>
+                    Reset search
+                  </button>
+                </div>
+              )}
+            </div>
+          </main>
+
+          <aside className="app-inspector" aria-live="polite">
+            {inspected && (
+              <div
+                key={inspected.url}
+                className={`app-inspector-inner${keyboardSelection ? ' is-instant' : ''}`}
+              >
+                <p className="app-kicker">In focus</p>
+                <img
+                  src={inspected.iconUrl || getFaviconUrl(inspected.url, 128)}
+                  alt=""
+                  className="app-inspector-icon"
+                />
+                <h2>{inspected.title}</h2>
+                <p className="app-inspector-location">
+                  {inspected.section}
+                  {inspected.subsection ? ` / ${inspected.subsection}` : ''}
+                </p>
+                <p className="app-inspector-url">{new URL(normalizeUrl(inspected.url)).hostname}</p>
+                {(inspected.description || inspected.product) && (
+                  <p className="app-inspector-description">
+                    {inspected.description || inspected.product}
+                  </p>
+                )}
+                <dl>
+                  {inspected.subsection && (
+                    <div className="app-meta-row">
+                      <dt>Group</dt><dd>{inspected.subsection}</dd>
+                    </div>
+                  )}
+                  {inspected.tier && (
+                    <div className="app-meta-row">
+                      <dt>Tier</dt>
+                      <dd>
+                        <span
+                          className="app-tier"
+                          data-tier={tierRank(inspected.tier)}
+                        >
+                          {inspected.tier}
+                        </span>
+                      </dd>
+                    </div>
+                  )}
+                  <MetaList label="Category" values={inspected.categories} />
+                  <MetaList label="Does" values={inspected.capabilities} />
+                  <MetaList label="Format" values={inspected.formats} />
+                  <MetaList label="Good" values={inspected.pros} />
+                  <MetaList label="Watch" values={inspected.cons} />
+                </dl>
+                <div className="app-inspector-actions">
+                  <button
+                    type="button"
+                    onClick={() => openBookmarkDialog({
+                      mode: 'edit',
+                      bookmark: inspected,
+                    })}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    className="is-danger"
+                    onClick={() => deleteBookmark(inspected)}
+                  >
+                    Delete
+                  </button>
+                </div>
+                <a href={normalizeUrl(inspected.url)} className="app-open-link">
+                  Open destination <span>↗</span>
+                </a>
+              </div>
+            )}
+          </aside>
+
+          {dropMode === 'url' && (
+            <div className="app-url-drop-hint" role="status">
+              <span aria-hidden="true">＋</span>
+              <div>
+                <strong>Drop URL to save</strong>
+                <small>
+                  It will land in {resolveDropSection(urlDropSection, section)}
+                </small>
+              </div>
             </div>
           )}
-        </div>
-      </main>
 
-      <aside className="app-inspector" aria-live="polite">
-        {inspected && (
-          <div
-            key={inspected.url}
-            className={`app-inspector-inner${keyboardSelection ? ' is-instant' : ''}`}
-          >
-            <p className="app-kicker">In focus</p>
-            <img
-              src={inspected.iconUrl || getFaviconUrl(inspected.url, 128)}
-              alt=""
-              className="app-inspector-icon"
-            />
-            <h2>{inspected.title}</h2>
-            <p className="app-inspector-location">
-              {inspected.section}
-              {inspected.subsection ? ` / ${inspected.subsection}` : ''}
-            </p>
-            <p className="app-inspector-url">{new URL(normalizeUrl(inspected.url)).hostname}</p>
-            {(inspected.description || inspected.product) && (
-              <p className="app-inspector-description">
-                {inspected.description || inspected.product}
-              </p>
-            )}
-            <dl>
-              {inspected.subsection && (
-                <div className="app-meta-row">
-                  <dt>Group</dt><dd>{inspected.subsection}</dd>
-                </div>
-              )}
-              {inspected.tier && (
-                <div className="app-meta-row">
-                  <dt>Tier</dt>
-                  <dd>
-                    <span
-                      className="app-tier"
-                      data-tier={tierRank(inspected.tier)}
-                    >
-                      {inspected.tier}
-                    </span>
-                  </dd>
-                </div>
-              )}
-              <MetaList label="Category" values={inspected.categories} />
-              <MetaList label="Does" values={inspected.capabilities} />
-              <MetaList label="Format" values={inspected.formats} />
-              <MetaList label="Good" values={inspected.pros} />
-              <MetaList label="Watch" values={inspected.cons} />
-            </dl>
-            <div className="app-inspector-actions">
-              <button
-                type="button"
-                onClick={() => setBookmarkDialog({
-                  mode: 'edit',
-                  bookmark: inspected,
-                })}
-              >
-                Edit
-              </button>
-              <button
-                type="button"
-                className="is-danger"
-                onClick={() => deleteBookmark(inspected)}
-              >
-                Delete
-              </button>
+          {dropMode === 'file' && (
+            <div className="app-url-drop-hint" role="status">
+              <span aria-hidden="true">↗</span>
+              <div>
+                <strong>Drop file to import</strong>
+                <small>Review changes in Import Studio (.json or .html)</small>
+              </div>
             </div>
-            <a href={normalizeUrl(inspected.url)} className="app-open-link">
-              Open destination <span>↗</span>
-            </a>
-          </div>
-        )}
-      </aside>
+          )}
 
-      {dropMode === 'url' && (
-        <div className="app-url-drop-hint" role="status">
-          <span aria-hidden="true">＋</span>
-          <div>
-            <strong>Drop URL to save</strong>
-            <small>
-              It will land in {resolveDropSection(urlDropSection, section)}
-            </small>
-          </div>
+          {exportMenuOpen && (
+            <>
+              <div
+                className="app-export-backdrop"
+                aria-hidden="true"
+                onPointerDown={(event) => {
+                  event.preventDefault();
+                  closeExportMenu(false);
+                }}
+              />
+              <div
+                ref={exportMenuRef}
+                className="app-export-popover"
+                role="menu"
+                aria-label="Export bookmarks"
+                style={{ left: exportMenuPos.left, top: exportMenuPos.top }}
+                onKeyDown={handleExportMenuKeyDown}
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="app-context-menu-item"
+                  onClick={exportJson}
+                >
+                  <span>JSON backup</span>
+                  <small>.json</small>
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="app-context-menu-item"
+                  onClick={exportHtml}
+                >
+                  <span>Browser HTML</span>
+                  <small>.html</small>
+                </button>
+              </div>
+            </>
+          )}
+
+          {contextMenu && (
+            <ContextMenu
+              key={contextMenu.id}
+              anchor={contextMenu.anchor}
+              openedBy={contextMenu.openedBy}
+              target={contextMenu.target}
+              sections={[...sectionCounts.keys()]}
+              onOpenNewTab={(bookmark) => {
+                closeContextMenu(contextMenu.openedBy === 'keyboard');
+                window.open(normalizeUrl(bookmark.url), '_blank', 'noopener,noreferrer');
+              }}
+              onCopyUrl={(bookmark) => {
+                closeContextMenu(contextMenu.openedBy === 'keyboard');
+                copyBookmarkUrl(bookmark);
+              }}
+              onEditBookmark={(bookmark) => {
+                const trigger = contextMenuTriggerRef.current;
+                closeContextMenu(false);
+                openBookmarkDialog({ mode: 'edit', bookmark }, trigger);
+              }}
+              onMoveBookmark={(bookmark, targetSection) => {
+                closeContextMenu(false);
+                moveBookmarkSection(bookmark, targetSection);
+              }}
+              onDeleteBookmark={(bookmark) => {
+                closeContextMenu(false);
+                deleteBookmark(bookmark);
+              }}
+              onAddBookmarkToSection={(targetSection) => {
+                const trigger = contextMenuTriggerRef.current;
+                closeContextMenu(false);
+                openBookmarkDialog({ mode: 'add', initialSection: targetSection }, trigger);
+              }}
+              onRenameSection={(targetSection) => {
+                const trigger = contextMenuTriggerRef.current;
+                closeContextMenu(false);
+                openSectionDialog({ mode: 'rename', section: targetSection }, trigger);
+              }}
+              onRemoveSection={(targetSection) => {
+                const trigger = contextMenuTriggerRef.current;
+                closeContextMenu(false);
+                openSectionDialog({ mode: 'delete', section: targetSection }, trigger);
+              }}
+              onReopenAt={reopenContextMenuAt}
+              onClose={closeContextMenu}
+            />
+          )}
         </div>
       )}
 
@@ -1541,58 +2511,21 @@ function App() {
         </div>
       )}
 
-      {contextMenu && (
-        <ContextMenu
-          key={contextMenu.id}
-          anchor={contextMenu.anchor}
-          openedBy={contextMenu.openedBy}
-          target={contextMenu.target}
-          sections={[...sectionCounts.keys()]}
-          onOpenNewTab={(bookmark) => {
-            closeContextMenu(contextMenu.openedBy === 'keyboard');
-            window.open(normalizeUrl(bookmark.url), '_blank', 'noopener,noreferrer');
-          }}
-          onCopyUrl={(bookmark) => {
-            closeContextMenu(contextMenu.openedBy === 'keyboard');
-            copyBookmarkUrl(bookmark);
-          }}
-          onEditBookmark={(bookmark) => {
-            closeContextMenu(false);
-            setBookmarkDialog({ mode: 'edit', bookmark });
-          }}
-          onMoveBookmark={(bookmark, targetSection) => {
-            closeContextMenu(false);
-            moveBookmarkSection(bookmark, targetSection);
-          }}
-          onDeleteBookmark={(bookmark) => {
-            closeContextMenu(false);
-            deleteBookmark(bookmark);
-          }}
-          onAddBookmarkToSection={(targetSection) => {
-            closeContextMenu(false);
-            setBookmarkDialog({ mode: 'add', initialSection: targetSection });
-          }}
-          onRenameSection={(targetSection) => {
-            closeContextMenu(false);
-            setSectionDialog({ mode: 'rename', section: targetSection });
-          }}
-          onRemoveSection={(targetSection) => {
-            closeContextMenu(false);
-            setSectionDialog({ mode: 'delete', section: targetSection });
-          }}
-          onReopenAt={reopenContextMenuAt}
-          onClose={closeContextMenu}
-        />
-      )}
-
       {bookmarkDialog && (
         <BookmarkDialog
+          key={
+            bookmarkDialog.mode === 'edit'
+              ? `edit-${bookmarkDialog.revision}`
+              : `add-${bookmarkDialog.revision}`
+          }
           bookmark={bookmarkDialog.mode === 'edit' ? bookmarkDialog.bookmark : undefined}
           initialSection={bookmarkDialog.mode === 'add'
             ? bookmarkDialog.initialSection
             : bookmarkDialog.bookmark.section}
           sections={[...sectionCounts.keys()]}
-          onCancel={() => setBookmarkDialog(null)}
+          conflict={externalConflict}
+          onLoadExternal={handleLoadExternalChanges}
+          onCancel={cancelBookmarkDialog}
           onSave={saveBookmark}
         />
       )}
@@ -1605,9 +2538,40 @@ function App() {
           otherSections={[...sectionCounts.keys()].filter(
             (name) => name !== sectionDialog.section,
           )}
-          onCancel={() => setSectionDialog(null)}
+          conflict={externalConflict}
+          onLoadExternal={handleLoadExternalChanges}
+          onCancel={cancelSectionDialog}
           onRename={renameSection}
           onDelete={deleteSection}
+        />
+      )}
+
+      {importMergeDialog && (
+        <ImportMergeDialog
+          fileName={importMergeDialog.fileName}
+          format={importMergeDialog.format}
+          existingBookmarks={bookmarks}
+          incomingBookmarks={importMergeDialog.bookmarks}
+          skippedNonHttpCount={importMergeDialog.skippedNonHttpCount}
+          intraFileDuplicateCount={importMergeDialog.intraFileDuplicateCount}
+          conflict={externalConflict}
+          onLoadExternal={handleLoadExternalChanges}
+          onCancel={cancelImportMerge}
+          onCommit={commitImportMerge}
+        />
+      )}
+
+      {snapshotDialog && (
+        <SnapshotDialog
+          snapshots={snapshots}
+          liveBookmarks={bookmarks}
+          corruptBackup={corruptBackup}
+          onClose={closeSnapshotDialog}
+          onRestore={handleRestoreSnapshot}
+          onCreateCheckpoint={handleCreateCheckpoint}
+          onDeleteSnapshot={handleDeleteSnapshot}
+          onRepairCorruptBackup={openRepairBackup}
+          onDismissCorruptBackup={handleDismissCorruptBackup}
         />
       )}
 
@@ -1615,32 +2579,74 @@ function App() {
         <div
           className={`app-editor-backdrop${editorClosing ? ' is-closing' : ''}`}
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) closeEditor();
+            if (event.target === event.currentTarget) closeEditor(true);
           }}
         >
           <section
+            ref={editorDialogRef}
+            tabIndex={-1}
             className={`app-editor${editorClosing ? ' is-closing' : ''}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="app-editor-title"
             onKeyDown={(event) => {
-              if (event.key === 'Escape') closeEditor();
+              if (event.nativeEvent.isComposing || event.defaultPrevented) return;
+              if (
+                (event.ctrlKey || event.metaKey)
+                && event.key.toLowerCase() === 's'
+              ) {
+                event.preventDefault();
+                if (externalConflict) {
+                  focusConflictBanner(editorDialogRef.current);
+                  setEditorError({
+                    title: 'External conflict pending',
+                    detail: 'Resolve the external tab conflict above first.',
+                  });
+                  return;
+                }
+                saveEditor(false);
+                return;
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                closeEditor(true);
+              }
             }}
           >
             <header>
               <div>
-                <p className="app-kicker">Local data</p>
-                <h2 id="app-editor-title">Edit JSON</h2>
+                <p className="app-kicker">
+                  {editorRepairMode ? 'Backup recovery' : 'Local data'}
+                </p>
+                <h2 id="app-editor-title">
+                  {editorRepairMode ? 'Repair backup JSON' : 'Edit JSON'}
+                </h2>
               </div>
               <div className="app-editor-actions">
-                <button type="button" onClick={closeEditor}>
+                <button type="button" onClick={() => closeEditor(true)}>
                   Cancel
                 </button>
-                <button type="button" className="is-primary" onClick={saveEditor}>
-                  Save changes
+                <button
+                  type="button"
+                  className="is-primary"
+                  disabled={externalConflict !== null}
+                  onClick={() => saveEditor(false)}
+                >
+                  {editorRepairMode ? 'Save & restore' : 'Save changes'}
                 </button>
               </div>
             </header>
+            {externalConflict && (
+              <ExternalConflictBanner
+                conflict={externalConflict}
+                onLoadExternal={handleLoadExternalChanges}
+                onSaveMine={() => {
+                  setEditorError(null);
+                  saveEditor(true);
+                }}
+                className="app-editor-conflict"
+              />
+            )}
             {editorError && (
               <ErrorNotice
                 error={editorError}

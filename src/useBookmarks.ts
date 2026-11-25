@@ -1,10 +1,22 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   BACKUP_KEY,
   STORAGE_KEY,
   loadStoredBookmarks,
   type Bookmark,
 } from './bookmarks.ts';
+import {
+  clearCorruptBackup,
+  deleteSnapshotFromVault,
+  loadSnapshots,
+  persistBookmarksWithVault,
+  readCorruptBackup,
+  saveManualSnapshot,
+  type BookmarkSnapshot,
+  type CorruptBackupInfo,
+  type PersistVaultOptions,
+  type PersistVaultResult,
+} from './snapshotVault.ts';
 
 export interface AppError {
   title: string;
@@ -66,12 +78,28 @@ export function loadInitialState(): InitialState {
   }
 }
 
+function getBrowserStorage(): Storage | null {
+  try {
+    return localStorage;
+  } catch {
+    return null;
+  }
+}
+
 export function useBookmarks() {
   // Lazy initializer: runs once per mount instead of at module import,
   // so tests/SSR importing this module pay no localStorage cost.
   const [initialState] = useState(loadInitialState);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>(initialState.bookmarks);
   const [undoState, setUndoState] = useState<UndoState | null>(null);
+  const [snapshots, setSnapshots] = useState<BookmarkSnapshot[]>(() => {
+    const storage = getBrowserStorage();
+    return storage ? loadSnapshots(storage) : [];
+  });
+  const [corruptBackup, setCorruptBackup] = useState<CorruptBackupInfo | null>(() => {
+    const storage = getBrowserStorage();
+    return storage ? readCorruptBackup(storage) : null;
+  });
 
   useEffect(() => {
     if (!undoState) return;
@@ -79,39 +107,116 @@ export function useBookmarks() {
     return () => window.clearTimeout(timeoutId);
   }, [undoState]);
 
-  const persist = (nextBookmarks: Bookmark[], undo: UndoMeta | null): boolean => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextBookmarks));
-    } catch {
-      return false;
+  const persistWithMeta = (
+    nextBookmarks: Bookmark[],
+    undo: UndoMeta | null,
+    options: PersistVaultOptions = {},
+  ): PersistVaultResult => {
+    const storage = getBrowserStorage();
+    if (!storage) {
+      return { ok: false, snapshots, evictedForPrimary: 0 };
     }
+
+    const resolvedSnapshots = options.snapshots?.map((request) => ({
+      ...request,
+      bookmarks: request.bookmarks ?? bookmarks,
+    }));
+
+    const result = persistBookmarksWithVault(storage, nextBookmarks, {
+      ...options,
+      snapshots: resolvedSnapshots,
+    });
+    if (!result.ok) {
+      return result;
+    }
+
     setBookmarks(nextBookmarks);
-    // Snapshot the previous bookmarks so undo restores what was just replaced.
+    setSnapshots(result.snapshots);
     setUndoState(undo ? { ...undo, bookmarks } : null);
-    return true;
+    setCorruptBackup(readCorruptBackup(storage));
+    return result;
   };
+
+  const persist = (nextBookmarks: Bookmark[], undo: UndoMeta | null): boolean =>
+    persistWithMeta(nextBookmarks, undo).ok;
 
   const restoreUndo = (): RestoreUndoResult => {
     if (!undoState) return null;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(undoState.bookmarks));
-    } catch {
+    const storage = getBrowserStorage();
+    if (!storage) {
       return { error: storageError('Couldn’t undo last change') };
     }
+
+    const result = persistBookmarksWithVault(storage, undoState.bookmarks);
+    if (!result.ok) {
+      return { error: storageError('Couldn’t undo last change') };
+    }
+
     const snapshot = undoState;
     setBookmarks(snapshot.bookmarks);
+    setSnapshots(result.snapshots);
     setUndoState(null);
+    setCorruptBackup(readCorruptBackup(storage));
     return snapshot;
   };
 
-  const clearUndo = () => setUndoState(null);
+  const createCheckpoint = (
+    label: string,
+  ): {
+    ok: boolean;
+    status: 'added' | 'upgraded' | 'skipped-empty' | 'quota-exceeded';
+  } => {
+    const storage = getBrowserStorage();
+    if (!storage) {
+      return { ok: false, status: 'quota-exceeded' };
+    }
+    const result = saveManualSnapshot(storage, bookmarks, label);
+    setSnapshots(result.snapshots);
+    return { ok: result.ok, status: result.status };
+  };
+
+  const deleteSnapshot = (snapshotId: string): boolean => {
+    const storage = getBrowserStorage();
+    if (!storage) return false;
+    const result = deleteSnapshotFromVault(storage, snapshotId);
+    setSnapshots(result.snapshots);
+    return result.ok;
+  };
+
+  const dismissCorruptBackup = () => {
+    const storage = getBrowserStorage();
+    if (!storage) return;
+    clearCorruptBackup(storage);
+    setCorruptBackup(readCorruptBackup(storage));
+  };
+
+  const refreshVaultFromStorage = useCallback(() => {
+    const storage = getBrowserStorage();
+    if (!storage) return;
+    setSnapshots(loadSnapshots(storage));
+    setCorruptBackup(readCorruptBackup(storage));
+  }, []);
+
+  const applyExternalBookmarksState = useCallback((nextBookmarks: Bookmark[]) => {
+    setBookmarks(nextBookmarks);
+  }, []);
+
+  const clearUndo = useCallback(() => setUndoState(null), []);
 
   return {
     bookmarks,
     initialError: initialState.error,
     undoState,
+    snapshots,
+    corruptBackup,
     persist,
+    persistWithMeta,
     restoreUndo,
     clearUndo,
+    createCheckpoint,
+    deleteSnapshot,
+    dismissCorruptBackup,
+    refreshVaultFromStorage,
+    applyExternalBookmarksState,
   };
 }
