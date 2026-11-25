@@ -158,6 +158,82 @@ export function searchBookmarks(bookmarks: Bookmark[], query: string): Bookmark[
         .map(([bookmark]) => bookmark);
 }
 
+export function groupBookmarksBySection(bookmarks: Bookmark[]): Bookmark[] {
+    const groups = new Map<string, Bookmark[]>();
+    for (const bookmark of bookmarks) {
+        let group = groups.get(bookmark.section);
+        if (!group) {
+            group = [];
+            groups.set(bookmark.section, group);
+        }
+        group.push(bookmark);
+    }
+    return [...groups.values()].flat();
+}
+
+export function insertBookmarkInSection(
+    bookmarks: Bookmark[],
+    bookmark: Bookmark,
+): Bookmark[] {
+    const grouped = groupBookmarksBySection(bookmarks);
+    let lastIndex = -1;
+    for (let index = grouped.length - 1; index >= 0; index -= 1) {
+        if (grouped[index].section === bookmark.section) {
+            lastIndex = index;
+            break;
+        }
+    }
+    if (lastIndex < 0) return [...grouped, bookmark];
+
+    const next = [...grouped];
+    next.splice(lastIndex + 1, 0, bookmark);
+    return next;
+}
+
+export function moveBookmarkToSection(
+    bookmarks: Bookmark[],
+    source: Bookmark,
+    targetSection: string,
+): Bookmark[] {
+    if (!targetSection.trim() || targetSection === 'All') return bookmarks;
+
+    const grouped = groupBookmarksBySection(bookmarks);
+    const sourceIndex = grouped.indexOf(source);
+    if (sourceIndex < 0 || source.section === targetSection) return bookmarks;
+
+    const remaining = [...grouped];
+    remaining.splice(sourceIndex, 1);
+    return insertBookmarkInSection(remaining, { ...source, section: targetSection });
+}
+
+export function reorderBookmark(
+    bookmarks: Bookmark[],
+    source: Bookmark,
+    target: Bookmark,
+    position: 'before' | 'after',
+): Bookmark[] {
+    if (source === target) return bookmarks;
+
+    const grouped = groupBookmarksBySection(bookmarks);
+    const sourceIdx = grouped.indexOf(source);
+    const targetIdx = grouped.indexOf(target);
+    if (sourceIdx < 0 || targetIdx < 0) return bookmarks;
+
+    const adjustedTarget = sourceIdx < targetIdx ? targetIdx - 1 : targetIdx;
+    const insertIdx = adjustedTarget + (position === 'after' ? 1 : 0);
+    if (source.section === target.section && insertIdx === sourceIdx) {
+        return bookmarks;
+    }
+
+    const next = [...grouped];
+    next.splice(sourceIdx, 1);
+    const moved = source.section === target.section
+        ? source
+        : { ...source, section: target.section };
+    next.splice(insertIdx, 0, moved);
+    return next;
+}
+
 export function reorderBookmarkSections(
     bookmarks: Bookmark[],
     source: string,

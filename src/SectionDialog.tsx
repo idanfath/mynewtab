@@ -75,6 +75,7 @@ export default function SectionDialog({
                     <input
                       type="radio"
                       name="section-action"
+                      autoFocus={otherSections.length > 0}
                       checked={strategy === 'move'}
                       onChange={() => setStrategy('move')}
                     />
@@ -92,6 +93,7 @@ export default function SectionDialog({
                   <input
                     type="radio"
                     name="section-action"
+                    autoFocus={otherSections.length === 0}
                     checked={strategy === 'delete'}
                     onChange={() => setStrategy('delete')}
                   />

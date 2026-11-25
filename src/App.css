@@ -164,6 +164,11 @@ html.app-route-root::-webkit-scrollbar {
     animation: app-nav-item-in 420ms var(--ease-enter) backwards;
 }
 
+.app-section-nav button > *,
+.app-bookmark > * {
+    pointer-events: none;
+}
+
 .app-section-nav button[draggable="true"] {
     cursor: grab;
 }
@@ -213,7 +218,8 @@ html.app-route-root::-webkit-scrollbar {
     transform: translateX(2px);
 }
 
-.app-section-nav button.is-url-drop-target {
+.app-section-nav button.is-url-drop-target,
+.app-section-nav button.is-bookmark-drop-target {
     color: var(--ink);
     border-color: color-mix(in oklch, var(--accent) 66%, transparent);
     background: color-mix(in oklch, var(--panel-raised) 78%, var(--accent) 12%);
@@ -223,7 +229,8 @@ html.app-route-root::-webkit-scrollbar {
     transform: translateX(3px);
 }
 
-.app-section-nav button.is-url-drop-target small {
+.app-section-nav button.is-url-drop-target small,
+.app-section-nav button.is-bookmark-drop-target small {
     color: var(--accent);
 }
 
@@ -586,8 +593,26 @@ html.app-route-root::-webkit-scrollbar {
     animation: app-directory-in 240ms var(--ease-enter) both;
 }
 
+.app-group {
+    transition: background-color 160ms var(--ease-state), box-shadow 160ms var(--ease-state);
+}
+
 .app-group + .app-group {
     margin-top: 3.5rem;
+}
+
+.app-group.is-url-drop-target,
+.app-group.is-bookmark-drop-target {
+    border-radius: 0.5rem;
+    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--accent) 52%, transparent);
+    background: oklch(0.18 0.012 75 / 0.34);
+}
+
+.app-group.is-url-drop-target .app-group-heading h2,
+.app-group.is-bookmark-drop-target .app-group-heading h2,
+.app-group.is-url-drop-target .app-group-heading span,
+.app-group.is-bookmark-drop-target .app-group-heading span {
+    color: var(--accent);
 }
 
 .app-group-heading {
@@ -657,6 +682,30 @@ html.app-route-root::-webkit-scrollbar {
 
 .app-bookmark:hover {
     box-shadow: none;
+}
+
+.app-bookmark.is-dragging {
+    opacity: 0.38;
+}
+
+.app-bookmark.is-drop-before::before,
+.app-bookmark.is-drop-after::after {
+    position: absolute;
+    right: 0;
+    left: 0;
+    height: 2px;
+    z-index: 2;
+    content: "";
+    background: var(--accent);
+    pointer-events: none;
+}
+
+.app-bookmark.is-drop-before::before {
+    top: -1px;
+}
+
+.app-bookmark.is-drop-after::after {
+    bottom: -1px;
 }
 
 .app-bookmark.is-keyboard-current {
@@ -1021,12 +1070,22 @@ html.app-route-root::-webkit-scrollbar {
     margin: 0.8rem 0.45rem 0;
 }
 
-.app-url-drop-hint,
-.app-undo-toast {
+.app-toast-stack {
     position: fixed;
     bottom: 2rem;
     left: 50%;
-    z-index: 80;
+    z-index: 81;
+    display: flex;
+    flex-direction: column-reverse;
+    align-items: center;
+    gap: 0.5rem;
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+
+.app-url-drop-hint,
+.app-undo-toast,
+.app-status-toast {
     display: flex;
     align-items: center;
     gap: 0.85rem;
@@ -1039,8 +1098,23 @@ html.app-route-root::-webkit-scrollbar {
     -webkit-backdrop-filter: blur(18px) saturate(112%);
     backdrop-filter: blur(18px) saturate(112%);
     box-shadow: 0 18px 50px oklch(0.05 0.008 75 / 0.3);
+}
+
+.app-url-drop-hint {
+    position: fixed;
+    bottom: 2rem;
+    left: 50%;
+    z-index: 80;
     transform: translateX(-50%);
+    pointer-events: none;
     animation: app-drop-message-in 220ms var(--ease-enter) backwards;
+}
+
+.app-toast-stack > * {
+    position: static;
+    transform: none;
+    pointer-events: auto;
+    animation: app-toast-in 220ms var(--ease-enter) backwards;
 }
 
 .app-url-drop-hint > span {
@@ -1056,7 +1130,8 @@ html.app-route-root::-webkit-scrollbar {
 }
 
 .app-url-drop-hint div,
-.app-undo-toast div {
+.app-undo-toast div,
+.app-status-toast div {
     display: flex;
     min-width: 0;
     flex: 1;
@@ -1065,14 +1140,16 @@ html.app-route-root::-webkit-scrollbar {
 }
 
 .app-url-drop-hint strong,
-.app-undo-toast strong {
+.app-undo-toast strong,
+.app-status-toast strong {
     font-family: Georgia, "Times New Roman", serif;
     font-size: 0.95rem;
     font-weight: 400;
 }
 
 .app-url-drop-hint small,
-.app-undo-toast small {
+.app-undo-toast small,
+.app-status-toast small {
     overflow: hidden;
     color: var(--quiet);
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
@@ -1081,10 +1158,6 @@ html.app-route-root::-webkit-scrollbar {
     text-overflow: ellipsis;
     text-transform: uppercase;
     white-space: nowrap;
-}
-
-.app-undo-toast {
-    z-index: 81;
 }
 
 .app-undo-toast button {
@@ -1096,6 +1169,127 @@ html.app-route-root::-webkit-scrollbar {
     cursor: pointer;
     font: inherit;
     font-size: 0.7rem;
+}
+
+.app-context-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 114;
+    background: transparent;
+}
+
+.app-context-menu {
+    position: fixed;
+    z-index: 115;
+    display: flex;
+    flex-direction: column;
+    width: min(15.5rem, calc(100vw - 16px));
+    padding: 0.35rem;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-strong) transparent;
+    border: 1px solid color-mix(in oklch, var(--line-strong) 82%, transparent);
+    border-radius: 0.5rem;
+    color: var(--ink);
+    background: oklch(0.15 0.009 75 / 0.88);
+    -webkit-backdrop-filter: blur(18px) saturate(112%);
+    backdrop-filter: blur(18px) saturate(112%);
+    box-shadow: 0 20px 56px oklch(0.04 0.008 75 / 0.45);
+    animation: app-context-menu-in 150ms var(--ease-enter) backwards;
+}
+
+.app-context-menu:focus {
+    outline: none;
+}
+
+.app-context-menu-header {
+    overflow: hidden;
+    padding: 0.35rem 0.55rem 0.45rem;
+    margin-bottom: 0.25rem;
+    border-bottom: 1px solid var(--line);
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.58rem;
+    font-weight: 650;
+    letter-spacing: 0.09em;
+    text-overflow: ellipsis;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.app-context-menu-list {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.app-context-menu-item,
+.app-context-menu-back {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    width: 100%;
+    padding: 0.48rem 0.6rem;
+    border: 0;
+    border-radius: 0.32rem;
+    color: var(--ink);
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.78rem;
+    text-align: left;
+    transition: color 120ms var(--ease-state), background-color 120ms var(--ease-state);
+}
+
+.app-context-menu-back {
+    color: var(--muted);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+}
+
+.app-context-menu-item > span,
+.app-context-menu-back > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-context-menu-item > small {
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.72rem;
+}
+
+.app-context-menu-item:hover,
+.app-context-menu-item:focus-visible,
+.app-context-menu-back:hover,
+.app-context-menu-back:focus-visible {
+    outline: none;
+    color: var(--ink);
+    background: color-mix(in oklch, var(--panel-raised) 84%, var(--accent) 8%);
+}
+
+.app-context-menu-item:hover > small,
+.app-context-menu-item:focus-visible > small {
+    color: var(--accent);
+}
+
+.app-context-menu-item.is-danger {
+    color: color-mix(in oklch, var(--danger) 70%, var(--ink));
+}
+
+.app-context-menu-item.is-danger:hover,
+.app-context-menu-item.is-danger:focus-visible {
+    color: color-mix(in oklch, var(--danger) 85%, var(--ink));
+    background: oklch(0.24 0.03 25 / 0.55);
+}
+
+.app-context-menu-divider {
+    height: 1px;
+    margin: 0.25rem 0.35rem;
+    background: var(--line);
 }
 
 .app-form-backdrop {
@@ -1554,6 +1748,20 @@ html.app-route-root::-webkit-scrollbar {
     }
 }
 
+@keyframes app-toast-in {
+    from {
+        opacity: 0;
+        transform: translate3d(0, 8px, 0);
+    }
+}
+
+@keyframes app-context-menu-in {
+    from {
+        opacity: 0;
+        transform: scale(0.97) translate3d(0, -3px, 0);
+    }
+}
+
 @keyframes app-directory-in {
     from {
         opacity: 0;
@@ -1637,6 +1845,26 @@ html.app-route-root::-webkit-scrollbar {
 
     .app-bookmark {
         border-bottom: 1px solid var(--directory-line);
+    }
+
+    .app-bookmark.is-drop-before::before,
+    .app-bookmark.is-drop-after::after {
+        top: 0.35rem;
+        bottom: 0.35rem;
+        width: 2px;
+        height: auto;
+        z-index: 2;
+        pointer-events: none;
+    }
+
+    .app-bookmark.is-drop-before::before {
+        right: auto;
+        left: -1px;
+    }
+
+    .app-bookmark.is-drop-after::after {
+        left: auto;
+        right: -1px;
     }
 
     .app-bookmark:nth-child(even) {

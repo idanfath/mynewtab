@@ -1,14 +1,18 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type ChangeEvent,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
 } from 'react';
 import Editor from '@monaco-editor/react';
 import icon from './assets/icon.png';
 import BookmarkDialog from './BookmarkDialog';
+import ContextMenu, { type ContextMenuTarget } from './ContextMenu';
 import SectionDialog from './SectionDialog';
 import { getFaviconUrl, normalizeUrl, urlIdentity } from './lib';
 import TypewriterText, { TYPEWRITER_DURATION } from './TypewriterText';
@@ -17,14 +21,20 @@ import { ErrorNotice, MetaList, UndoNotice } from './notices';
 import { formatBookmarkError } from './formatBookmarkError';
 import { tierRank } from './tierRank';
 import {
+  BOOKMARK_DRAG_TYPE,
   SECTION_DRAG_TYPE,
   detectDropMode,
   readDroppedTitle,
   readDroppedUrl,
+  resolveDropSection,
   type DropMode,
 } from './dropHandlers';
 import {
+  groupBookmarksBySection,
+  insertBookmarkInSection,
+  moveBookmarkToSection,
   parseBookmarks,
+  reorderBookmark,
   reorderBookmarkSections,
   searchBookmarks,
   type Bookmark,
@@ -47,6 +57,40 @@ interface SectionDialogState {
   section: string;
 }
 
+interface ContextMenuState {
+  id: number;
+  anchor: { x: number; y: number };
+  openedBy: 'pointer' | 'keyboard';
+  target: ContextMenuTarget;
+}
+
+interface StatusToast {
+  title: string;
+  detail?: string;
+}
+
+function getHoveredDropSection(target: EventTarget | null): string | null {
+  const element = target instanceof Element
+    ? target
+    : target instanceof Node
+      ? target.parentElement
+      : null;
+  return element?.closest<HTMLElement>('[data-drop-section]')?.dataset.dropSection ?? null;
+}
+
+function getBookmarkDropPosition(
+  event: DragEvent<HTMLElement>,
+  element: HTMLElement,
+): 'before' | 'after' {
+  const bounds = element.getBoundingClientRect();
+  const listEl = element.parentElement;
+  const isGrid = listEl ? getComputedStyle(listEl).display === 'grid' : false;
+  if (isGrid) {
+    return event.clientX < bounds.left + bounds.width / 2 ? 'before' : 'after';
+  }
+  return event.clientY < bounds.top + bounds.height / 2 ? 'before' : 'after';
+}
+
 function App() {
   const {
     bookmarks,
@@ -65,6 +109,12 @@ function App() {
     name: string;
     position: 'before' | 'after';
   } | null>(null);
+  const [draggedBookmark, setDraggedBookmark] = useState<Bookmark | null>(null);
+  const [bookmarkDropTarget, setBookmarkDropTarget] = useState<{
+    bookmark: Bookmark;
+    position: 'before' | 'after';
+  } | null>(null);
+  const [bookmarkDropSection, setBookmarkDropSection] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorClosing, setEditorClosing] = useState(false);
@@ -75,16 +125,27 @@ function App() {
   const [urlDropSection, setUrlDropSection] = useState<string | null>(null);
   const [bookmarkDialog, setBookmarkDialog] = useState<BookmarkDialogState | null>(null);
   const [sectionDialog, setSectionDialog] = useState<SectionDialogState | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [statusToast, setStatusToast] = useState<StatusToast | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const dropDepthRef = useRef(0);
+  const draggedBookmarkRef = useRef<Bookmark | null>(null);
+  const bookmarkDropTargetRef = useRef<{
+    bookmark: Bookmark;
+    position: 'before' | 'after';
+  } | null>(null);
+  const bookmarkDropSectionRef = useRef<string | null>(null);
+  const pendingScrollBookmarkRef = useRef<Bookmark | null>(null);
+  const contextMenuTriggerRef = useRef<HTMLElement | null>(null);
+  const contextMenuIdRef = useRef(0);
 
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const isTyping = target?.isContentEditable
         || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '');
-      if (isTyping || editorOpen || bookmarkDialog || sectionDialog) return;
+      if (isTyping || editorOpen || bookmarkDialog || sectionDialog || contextMenu) return;
 
       if (
         event.key === '/'
@@ -110,7 +171,13 @@ function App() {
     };
     document.addEventListener('keydown', handleShortcut);
     return () => document.removeEventListener('keydown', handleShortcut);
-  }, [bookmarkDialog, editorOpen, section, sectionDialog]);
+  }, [bookmarkDialog, contextMenu, editorOpen, section, sectionDialog]);
+
+  useEffect(() => {
+    if (!statusToast) return;
+    const timeoutId = window.setTimeout(() => setStatusToast(null), 2200);
+    return () => window.clearTimeout(timeoutId);
+  }, [statusToast]);
 
   const sectionCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -122,11 +189,32 @@ function App() {
 
   const matches = useMemo(() => {
     const searched = searchBookmarks(bookmarks, query);
-
-    return section === 'All'
+    const filtered = section === 'All'
       ? searched
       : searched.filter((bookmark) => bookmark.section === section);
+    return groupBookmarksBySection(filtered);
   }, [bookmarks, query, section]);
+
+  const matchIndices = useMemo(() => {
+    const indices = new Map<Bookmark, number>();
+    matches.forEach((bookmark, index) => {
+      indices.set(bookmark, index);
+    });
+    return indices;
+  }, [matches]);
+
+  useEffect(() => {
+    const target = pendingScrollBookmarkRef.current;
+    if (!target) return;
+    pendingScrollBookmarkRef.current = null;
+    const index = matchIndices.get(target);
+    if (index === undefined) return;
+    window.requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-app-bookmark-index="${index}"]`)
+        ?.scrollIntoView({ block: 'nearest' });
+    });
+  }, [matches, matchIndices]);
 
   const groupedMatches = useMemo(() => {
     const groups = new Map<string, Bookmark[]>();
@@ -192,6 +280,72 @@ function App() {
     }
   };
 
+  const commitBookmarkMove = (
+    nextBookmarks: Bookmark[],
+    source: Bookmark,
+    targetSection: string,
+    crossSection: boolean,
+  ) => {
+    const undo = crossSection
+      ? {
+          title: `Moved to ${targetSection}`,
+          detail: source.title,
+          section,
+          query,
+          activeBookmark,
+        }
+      : null;
+
+    if (!persist(nextBookmarks, undo)) {
+      setError(
+        storageError(
+          crossSection ? 'Couldn’t move bookmark' : 'Couldn’t save bookmark order',
+        ),
+      );
+      return;
+    }
+
+    if (activeBookmark === source) {
+      if (crossSection) {
+        const prevSet = new Set(bookmarks);
+        const moved = nextBookmarks.find((entry) => !prevSet.has(entry)) ?? null;
+        setActiveBookmark(moved);
+      } else {
+        setActiveBookmark(source);
+      }
+    }
+    if (
+      crossSection
+      && section !== 'All'
+      && !nextBookmarks.some((entry) => entry.section === section)
+    ) {
+      setSection('All');
+    }
+    setKeyboardSelection(false);
+    setError(null);
+  };
+
+  const moveBookmarkAt = (
+    source: Bookmark,
+    target: Bookmark,
+    position: 'before' | 'after',
+  ) => {
+    const nextBookmarks = reorderBookmark(bookmarks, source, target, position);
+    if (nextBookmarks === bookmarks) return;
+    commitBookmarkMove(
+      nextBookmarks,
+      source,
+      target.section,
+      source.section !== target.section,
+    );
+  };
+
+  const moveBookmarkSection = (source: Bookmark, targetSection: string) => {
+    const nextBookmarks = moveBookmarkToSection(bookmarks, source, targetSection);
+    if (nextBookmarks === bookmarks) return;
+    commitBookmarkMove(nextBookmarks, source, targetSection, true);
+  };
+
   const importFile = async (file: File) => {
     let content: string;
     try {
@@ -221,22 +375,68 @@ function App() {
     event.target.value = '';
   };
 
-  const resetDropState = () => {
+  const resetDropState = useCallback(() => {
     dropDepthRef.current = 0;
     setDropMode(null);
     setUrlDropSection(null);
-  };
+  }, []);
+
+  const updateBookmarkDropTarget = useCallback((
+    next: { bookmark: Bookmark; position: 'before' | 'after' } | null,
+  ) => {
+    const current = bookmarkDropTargetRef.current;
+    if (
+      current === next
+      || (current && next
+        && current.bookmark === next.bookmark
+        && current.position === next.position)
+    ) {
+      return;
+    }
+    bookmarkDropTargetRef.current = next;
+    setBookmarkDropTarget(next);
+  }, []);
+
+  const updateBookmarkDropSection = useCallback((next: string | null) => {
+    if (bookmarkDropSectionRef.current === next) return;
+    bookmarkDropSectionRef.current = next;
+    setBookmarkDropSection(next);
+  }, []);
+
+  const resetBookmarkDragState = useCallback(() => {
+    draggedBookmarkRef.current = null;
+    setDraggedBookmark(null);
+    updateBookmarkDropTarget(null);
+    updateBookmarkDropSection(null);
+  }, [updateBookmarkDropSection, updateBookmarkDropTarget]);
+
+  useEffect(() => {
+    const handleDragFinish = () => {
+      resetDropState();
+      resetBookmarkDragState();
+    };
+    window.addEventListener('dragend', handleDragFinish);
+    window.addEventListener('drop', handleDragFinish);
+    return () => {
+      window.removeEventListener('dragend', handleDragFinish);
+      window.removeEventListener('drop', handleDragFinish);
+    };
+  }, [resetBookmarkDragState, resetDropState]);
 
   const handleDragEnter = (
     event: DragEvent<HTMLElement>,
     allowFiles: boolean,
   ) => {
+    if (contextMenu) setContextMenu(null);
     if (bookmarkDialog || sectionDialog || editorOpen) return;
     const mode = detectDropMode(event.dataTransfer, allowFiles);
     if (!mode) return;
     event.preventDefault();
     dropDepthRef.current += 1;
-    if (mode === 'url') clearUndo();
+    if (mode === 'url') {
+      clearUndo();
+      setUrlDropSection(allowFiles ? null : getHoveredDropSection(event.target));
+    }
     setDropMode(mode);
   };
 
@@ -245,16 +445,32 @@ function App() {
     allowFiles: boolean,
   ) => {
     if (bookmarkDialog || sectionDialog || editorOpen) return;
-    if (!detectDropMode(event.dataTransfer, allowFiles)) return;
+    if (Array.from(event.dataTransfer.types).includes(BOOKMARK_DRAG_TYPE)) {
+      updateBookmarkDropTarget(null);
+      updateBookmarkDropSection(null);
+      return;
+    }
+    const mode = detectDropMode(event.dataTransfer, allowFiles);
+    if (!mode) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
+    if (mode === 'url') {
+      const hovered = allowFiles ? null : getHoveredDropSection(event.target);
+      setUrlDropSection((current) => (current === hovered ? current : hovered));
+      setDropMode((current) => (current === 'url' ? current : 'url'));
+    }
   };
 
   const handleDragLeave = (event: DragEvent<HTMLElement>) => {
+    const nextTarget = event.relatedTarget as Node | null;
+    if (!nextTarget || !event.currentTarget.contains(nextTarget)) {
+      updateBookmarkDropTarget(null);
+      updateBookmarkDropSection(null);
+    }
     if (!dropDepthRef.current) return;
     event.preventDefault();
     dropDepthRef.current = Math.max(0, dropDepthRef.current - 1);
-    if (dropDepthRef.current === 0) setDropMode(null);
+    if (dropDepthRef.current === 0) resetDropState();
   };
 
   const importDroppedFile = async (dataTransfer: DataTransfer) => {
@@ -310,7 +526,7 @@ function App() {
       url,
       section: targetSection,
     };
-    const nextBookmarks = [...bookmarks, bookmark];
+    const nextBookmarks = insertBookmarkInSection(bookmarks, bookmark);
 
     if (persist(nextBookmarks, {
       title: `Saved to ${targetSection}`,
@@ -319,8 +535,11 @@ function App() {
       query,
       activeBookmark,
     })) {
-      setSection(targetSection);
+      if (section !== 'All' && section !== targetSection) {
+        setSection(targetSection);
+      }
       setQuery('');
+      pendingScrollBookmarkRef.current = bookmark;
       setActiveBookmark(bookmark);
       setKeyboardSelection(false);
       setError(null);
@@ -334,14 +553,34 @@ function App() {
     allowFiles: boolean,
   ) => {
     if (bookmarkDialog || sectionDialog || editorOpen) return;
+
+    if (Array.from(event.dataTransfer.types).includes(BOOKMARK_DRAG_TYPE)) {
+      event.preventDefault();
+      const source = draggedBookmarkRef.current;
+      const target = bookmarkDropTargetRef.current;
+      const targetSec = bookmarkDropSectionRef.current;
+      resetBookmarkDragState();
+      if (!source) return;
+      if (target) {
+        moveBookmarkAt(source, target.bookmark, target.position);
+      } else if (targetSec) {
+        moveBookmarkSection(source, targetSec);
+      }
+      return;
+    }
+
     const mode = detectDropMode(event.dataTransfer, allowFiles);
+    const hovered = allowFiles ? null : getHoveredDropSection(event.target);
+    const targetSection = allowFiles
+      ? 'Uncategorized'
+      : resolveDropSection(hovered ?? urlDropSection, section);
     event.preventDefault();
     resetDropState();
 
     if (mode === 'file') {
       await importDroppedFile(event.dataTransfer);
     } else if (mode === 'url') {
-      addDroppedUrl(event.dataTransfer);
+      addDroppedUrl(event.dataTransfer, targetSection);
     }
   };
 
@@ -369,10 +608,19 @@ function App() {
     );
     if (duplicate) return `“${duplicate.title}” already uses this URL.`;
 
-    const nextBookmarks = editingBookmark
-      ? bookmarks.map((bookmark) =>
-        bookmark === editingBookmark ? nextBookmark : bookmark)
-      : [...bookmarks, nextBookmark];
+    let nextBookmarks: Bookmark[];
+    if (editingBookmark) {
+      if (nextBookmark.section === editingBookmark.section) {
+        nextBookmarks = bookmarks.map((bookmark) =>
+          bookmark === editingBookmark ? nextBookmark : bookmark,
+        );
+      } else {
+        const remaining = bookmarks.filter((bookmark) => bookmark !== editingBookmark);
+        nextBookmarks = insertBookmarkInSection(remaining, nextBookmark);
+      }
+    } else {
+      nextBookmarks = insertBookmarkInSection(bookmarks, nextBookmark);
+    }
 
     if (persist(nextBookmarks, null)) {
       setSection(nextBookmark.section);
@@ -436,7 +684,7 @@ function App() {
     });
 
     if (persist(nextBookmarks, null)) {
-      setSection(nextName);
+      if (section === previousName) setSection(nextName);
       setActiveBookmark(nextActiveBookmark);
       setKeyboardSelection(false);
       setError(null);
@@ -457,12 +705,19 @@ function App() {
     }
 
     const affectedCount = sectionCounts.get(sectionToDelete) ?? 0;
+    let nextActiveBookmark = activeBookmark;
     const nextBookmarks = strategy === 'move'
-      ? bookmarks.map((bookmark) =>
-        bookmark.section === sectionToDelete
-          ? { ...bookmark, section: destination! }
-          : bookmark)
-      : bookmarks.filter((bookmark) => bookmark.section !== sectionToDelete);
+      ? bookmarks.map((bookmark) => {
+        if (bookmark.section !== sectionToDelete) return bookmark;
+        const moved = { ...bookmark, section: destination! };
+        if (bookmark === activeBookmark) nextActiveBookmark = moved;
+        return moved;
+      })
+      : bookmarks.filter((bookmark) => {
+        if (bookmark.section !== sectionToDelete) return true;
+        if (bookmark === activeBookmark) nextActiveBookmark = null;
+        return false;
+      });
 
     if (persist(nextBookmarks, {
       title: strategy === 'move' ? 'Section removed' : 'Section and bookmarks removed',
@@ -473,14 +728,152 @@ function App() {
       query,
       activeBookmark,
     })) {
-      setSection(strategy === 'move' ? destination! : 'All');
-      setActiveBookmark(null);
+      if (section === sectionToDelete) {
+        setSection(strategy === 'move' ? destination! : 'All');
+      }
+      setActiveBookmark(nextActiveBookmark);
       setKeyboardSelection(false);
       setError(null);
       setSectionDialog(null);
       return null;
     }
     return 'Browser storage is full, blocked, or unavailable.';
+  };
+
+  const copyBookmarkUrl = (bookmark: Bookmark) => {
+    const url = normalizeUrl(bookmark.url);
+    if (!url || !navigator.clipboard?.writeText) {
+      setError({
+        title: 'Couldn’t copy URL',
+        detail: 'Clipboard access is unavailable in this browser context.',
+      });
+      return;
+    }
+
+    void navigator.clipboard.writeText(url).then(
+      () => {
+        setStatusToast({ title: 'Copied URL', detail: bookmark.title });
+      },
+      () => {
+        setError({
+          title: 'Couldn’t copy URL',
+          detail: 'Clipboard access was denied by the browser.',
+        });
+      },
+    );
+  };
+
+  const openContextMenu = (
+    target: ContextMenuTarget,
+    anchor: { x: number; y: number },
+    openedBy: 'pointer' | 'keyboard',
+    trigger: HTMLElement | null,
+  ) => {
+    contextMenuTriggerRef.current = trigger;
+    contextMenuIdRef.current += 1;
+    if (target.kind === 'bookmark') {
+      setKeyboardSelection(openedBy === 'keyboard');
+      setActiveBookmark(target.bookmark);
+    }
+    setContextMenu({
+      id: contextMenuIdRef.current,
+      anchor,
+      openedBy,
+      target,
+    });
+  };
+
+  const closeContextMenu = (restoreFocus: boolean) => {
+    setContextMenu(null);
+    if (!restoreFocus) return;
+    const trigger = contextMenuTriggerRef.current;
+    if (trigger?.isConnected) {
+      window.requestAnimationFrame(() => {
+        if (trigger.isConnected) trigger.focus({ preventScroll: true });
+      });
+    }
+  };
+
+  const handleElementContextMenu = (
+    event: ReactMouseEvent<HTMLElement>,
+    target: ContextMenuTarget,
+  ) => {
+    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const isKeyboardCoords = event.clientX === 0 && event.clientY === 0;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const anchor = isKeyboardCoords
+      ? { x: rect.left + 12, y: rect.bottom + 4 }
+      : { x: event.clientX, y: event.clientY };
+    openContextMenu(
+      target,
+      anchor,
+      isKeyboardCoords ? 'keyboard' : 'pointer',
+      event.currentTarget,
+    );
+  };
+
+  const handleElementContextKeyDown = (
+    event: ReactKeyboardEvent<HTMLElement>,
+    target: ContextMenuTarget,
+  ) => {
+    if (bookmarkDialog || sectionDialog || editorOpen) return;
+    if (
+      event.key === 'ContextMenu'
+      || (event.key === 'F10' && event.shiftKey)
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = event.currentTarget.getBoundingClientRect();
+      openContextMenu(
+        target,
+        { x: rect.left + 16, y: rect.bottom + 4 },
+        'keyboard',
+        event.currentTarget,
+      );
+    }
+  };
+
+  const reopenContextMenuAt = (x: number, y: number) => {
+    const hit = document
+      .elementsFromPoint(x, y)
+      .find(
+        (el) =>
+          !el.classList.contains('app-context-backdrop')
+          && !el.closest('.app-context-menu'),
+      );
+    const bookmarkEl = hit?.closest<HTMLElement>('.app-bookmark');
+    if (bookmarkEl) {
+      const idx = Number(bookmarkEl.dataset.appBookmarkIndex);
+      const targetBookmark = Number.isInteger(idx) ? matches[idx] : undefined;
+      if (targetBookmark) {
+        openContextMenu(
+          { kind: 'bookmark', bookmark: targetBookmark },
+          { x, y },
+          'pointer',
+          bookmarkEl,
+        );
+        return;
+      }
+    }
+
+    const sectionEl = hit?.closest<HTMLElement>(
+      '.app-section-nav button[data-drop-section], .app-group-heading[data-section-heading]',
+    );
+    const sectionName =
+      sectionEl?.dataset.dropSection ?? sectionEl?.dataset.sectionHeading;
+    if (sectionEl && sectionName) {
+      openContextMenu(
+        { kind: 'section', section: sectionName },
+        { x, y },
+        'pointer',
+        sectionEl,
+      );
+      return;
+    }
+
+    setContextMenu(null);
   };
 
   const chooseFile = () => {
@@ -621,10 +1014,26 @@ function App() {
             onSave={saveBookmark}
           />
         )}
-        {undoState && <UndoNotice undo={undoState} onUndo={undoLastChange} />}
+        {(undoState || statusToast) && (
+          <div className="app-toast-stack">
+            {undoState && <UndoNotice undo={undoState} onUndo={undoLastChange} />}
+            {statusToast && (
+              <div className="app-status-toast" role="status">
+                <div>
+                  <strong>{statusToast.title}</strong>
+                  {statusToast.detail && <small>{statusToast.detail}</small>}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </main>
     );
   }
+
+  const activeUrlDropSection = dropMode === 'url'
+    ? resolveDropSection(urlDropSection, section)
+    : null;
 
   return (
     <div
@@ -660,6 +1069,7 @@ function App() {
             <button
               key={name}
               draggable
+              data-drop-section={name}
               style={{ animationDelay: `${(index + 1) * 55}ms` }}
               className={`${section === name ? 'is-active' : ''}${
                 draggedSection === name ? ' is-dragging' : ''
@@ -668,20 +1078,18 @@ function App() {
                   ? ` is-drop-${dragTarget.position}`
                   : ''
               }${
-                urlDropSection === name ? ' is-url-drop-target' : ''
+                activeUrlDropSection === name ? ' is-url-drop-target' : ''
+              }${
+                bookmarkDropSection === name ? ' is-bookmark-drop-target' : ''
               }`}
               aria-pressed={section === name}
               title="Drag to reorder"
               onDragStart={(event) => {
+                if (contextMenu) setContextMenu(null);
                 event.dataTransfer.effectAllowed = 'move';
                 event.dataTransfer.setData(SECTION_DRAG_TYPE, name);
                 event.dataTransfer.setData('text/plain', name);
                 setDraggedSection(name);
-              }}
-              onDragEnter={(event) => {
-                if (detectDropMode(event.dataTransfer, false) === 'url') {
-                  setUrlDropSection(name);
-                }
               }}
               onDragOver={(event) => {
                 if (Array.from(event.dataTransfer.types).includes(SECTION_DRAG_TYPE)) {
@@ -697,16 +1105,13 @@ function App() {
                   return;
                 }
 
-                if (detectDropMode(event.dataTransfer, false) === 'url') {
+                const dragged = draggedBookmarkRef.current;
+                if (dragged && dragged.section !== name) {
                   event.preventDefault();
-                  event.dataTransfer.dropEffect = 'copy';
-                  setUrlDropSection(name);
-                }
-              }}
-              onDragLeave={(event) => {
-                const nextTarget = event.relatedTarget as Node | null;
-                if (!nextTarget || !event.currentTarget.contains(nextTarget)) {
-                  setUrlDropSection((current) => current === name ? null : current);
+                  event.stopPropagation();
+                  event.dataTransfer.dropEffect = 'move';
+                  updateBookmarkDropTarget(null);
+                  updateBookmarkDropSection(name);
                 }
               }}
               onDrop={(event) => {
@@ -719,21 +1124,16 @@ function App() {
                   }
                   setDraggedSection(null);
                   setDragTarget(null);
-                  return;
-                }
-
-                if (detectDropMode(event.dataTransfer, false) === 'url') {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  resetDropState();
-                  addDroppedUrl(event.dataTransfer, name);
                 }
               }}
               onDragEnd={() => {
                 setDraggedSection(null);
                 setDragTarget(null);
-                setUrlDropSection(null);
               }}
+              onContextMenu={(event) =>
+                handleElementContextMenu(event, { kind: 'section', section: name })}
+              onKeyDown={(event) =>
+                handleElementContextKeyDown(event, { kind: 'section', section: name })}
               onClick={() => {
                 setSection(name);
                 setActiveBookmark(null);
@@ -887,59 +1287,146 @@ function App() {
         </header>
 
         <div key={section} className="app-directory">
-          {[...groupedMatches].map(([sectionName, items]) => (
-            <section key={sectionName} className="app-group">
-              <div className="app-group-heading">
-                <h2>{sectionName}</h2>
-                <span>{String(items.length).padStart(2, '0')}</span>
-              </div>
-              <div className="app-bookmark-list">
-                {items.map((bookmark) => {
-                  const bookmarkIndex = matches.indexOf(bookmark);
-                  return (
-                    <a
-                      key={`${bookmark.url}-${bookmark.title}`}
-                      href={normalizeUrl(bookmark.url)}
-                      data-app-bookmark-index={bookmarkIndex}
-                      className={bookmark === inspected
-                        ? `app-bookmark is-current${keyboardSelection ? ' is-keyboard-current' : ''}`
-                        : 'app-bookmark'}
-                      onMouseEnter={() => {
-                        setKeyboardSelection(false);
-                        setActiveBookmark(bookmark);
-                      }}
-                      onFocus={() => {
-                        setKeyboardSelection(true);
-                        setActiveBookmark(bookmark);
-                      }}
-                    >
-                      <img
-                        src={bookmark.iconUrl || getFaviconUrl(bookmark.url, 64)}
-                        alt=""
-                      />
-                      <span className="app-bookmark-copy">
-                        <strong>{bookmark.title}</strong>
-                        <small>
-                          {bookmark.subsection || bookmark.description || bookmark.product || bookmark.url}
-                        </small>
-                      </span>
-                      <span className="app-bookmark-tail">
-                        {bookmark.tier && (
-                          <em
-                            className="app-tier"
-                            data-tier={tierRank(bookmark.tier)}
-                          >
-                            {bookmark.tier}
-                          </em>
-                        )}
-                        <b aria-hidden="true">↗</b>
-                      </span>
-                    </a>
-                  );
-                })}
-              </div>
-            </section>
-          ))}
+          {[...groupedMatches].map(([sectionName, items]) => {
+            const seenKeys = new Map<string, number>();
+            return (
+              <section
+                key={sectionName}
+                data-drop-section={sectionName}
+                className={`app-group${
+                  activeUrlDropSection === sectionName ? ' is-url-drop-target' : ''
+                }${
+                  bookmarkDropSection === sectionName ? ' is-bookmark-drop-target' : ''
+                }`}
+                onDragOver={(event) => {
+                  const dragged = draggedBookmarkRef.current;
+                  if (dragged && dragged.section !== sectionName) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.dataTransfer.dropEffect = 'move';
+                    updateBookmarkDropTarget(null);
+                    updateBookmarkDropSection(sectionName);
+                  }
+                }}
+              >
+                <div
+                  className="app-group-heading"
+                  data-section-heading={sectionName}
+                  onContextMenu={(event) =>
+                    handleElementContextMenu(event, {
+                      kind: 'section',
+                      section: sectionName,
+                    })}
+                >
+                  <h2>{sectionName}</h2>
+                  <span>{String(items.length).padStart(2, '0')}</span>
+                </div>
+                <div className="app-bookmark-list">
+                  {items.map((bookmark) => {
+                    const bookmarkIndex = matchIndices.get(bookmark) ?? -1;
+                    const baseKey = `${bookmark.url}-${bookmark.title}`;
+                    const occurrence = seenKeys.get(baseKey) ?? 0;
+                    seenKeys.set(baseKey, occurrence + 1);
+                    const key = occurrence === 0 ? baseKey : `${baseKey}-${occurrence}`;
+                    const dropClass = bookmarkDropTarget?.bookmark === bookmark
+                      ? ` is-drop-${bookmarkDropTarget.position}`
+                      : '';
+                    return (
+                      <a
+                        key={key}
+                        draggable
+                        href={normalizeUrl(bookmark.url)}
+                        data-app-bookmark-index={bookmarkIndex}
+                        className={`app-bookmark${
+                          bookmark === inspected
+                            ? ` is-current${keyboardSelection ? ' is-keyboard-current' : ''}`
+                            : ''
+                        }${
+                          draggedBookmark === bookmark ? ' is-dragging' : ''
+                        }${dropClass}`}
+                        onMouseEnter={() => {
+                          setKeyboardSelection(false);
+                          setActiveBookmark(bookmark);
+                        }}
+                        onFocus={() => {
+                          setKeyboardSelection(true);
+                          setActiveBookmark(bookmark);
+                        }}
+                        onDragStart={(event) => {
+                          if (contextMenu) setContextMenu(null);
+                          event.dataTransfer.effectAllowed = 'copyMove';
+                          event.dataTransfer.setData(BOOKMARK_DRAG_TYPE, '1');
+                          event.dataTransfer.setData(
+                            'text/uri-list',
+                            normalizeUrl(bookmark.url),
+                          );
+                          event.dataTransfer.setData(
+                            'text/plain',
+                            normalizeUrl(bookmark.url),
+                          );
+                          draggedBookmarkRef.current = bookmark;
+                          setDraggedBookmark(bookmark);
+                        }}
+                        onDragOver={(event) => {
+                          const source = draggedBookmarkRef.current;
+                          if (!source || query.trim()) return;
+                          const position = getBookmarkDropPosition(
+                            event,
+                            event.currentTarget,
+                          );
+                          if (
+                            reorderBookmark(bookmarks, source, bookmark, position)
+                            === bookmarks
+                          ) {
+                            return;
+                          }
+                          event.preventDefault();
+                          event.stopPropagation();
+                          event.dataTransfer.dropEffect = 'move';
+                          updateBookmarkDropSection(null);
+                          updateBookmarkDropTarget({ bookmark, position });
+                        }}
+                        onDragEnd={resetBookmarkDragState}
+                        onContextMenu={(event) =>
+                          handleElementContextMenu(event, {
+                            kind: 'bookmark',
+                            bookmark,
+                          })}
+                        onKeyDown={(event) =>
+                          handleElementContextKeyDown(event, {
+                            kind: 'bookmark',
+                            bookmark,
+                          })}
+                      >
+                        <img
+                          src={bookmark.iconUrl || getFaviconUrl(bookmark.url, 64)}
+                          alt=""
+                          draggable={false}
+                        />
+                        <span className="app-bookmark-copy">
+                          <strong>{bookmark.title}</strong>
+                          <small>
+                            {bookmark.subsection || bookmark.description || bookmark.product || bookmark.url}
+                          </small>
+                        </span>
+                        <span className="app-bookmark-tail">
+                          {bookmark.tier && (
+                            <em
+                              className="app-tier"
+                              data-tier={tierRank(bookmark.tier)}
+                            >
+                              {bookmark.tier}
+                            </em>
+                          )}
+                          <b aria-hidden="true">↗</b>
+                        </span>
+                      </a>
+                    );
+                  })}
+                </div>
+              </section>
+            );
+          })}
 
           {!matches.length && (
             <div className="app-no-results">
@@ -1032,14 +1519,70 @@ function App() {
           <div>
             <strong>Drop URL to save</strong>
             <small>
-              It will land in {urlDropSection ?? 'Uncategorized'}
+              It will land in {resolveDropSection(urlDropSection, section)}
             </small>
           </div>
         </div>
       )}
 
-      {undoState && (
-        <UndoNotice undo={undoState} onUndo={undoLastChange} />
+      {(undoState || statusToast) && (
+        <div className="app-toast-stack">
+          {undoState && (
+            <UndoNotice undo={undoState} onUndo={undoLastChange} />
+          )}
+          {statusToast && (
+            <div className="app-status-toast" role="status">
+              <div>
+                <strong>{statusToast.title}</strong>
+                {statusToast.detail && <small>{statusToast.detail}</small>}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {contextMenu && (
+        <ContextMenu
+          key={contextMenu.id}
+          anchor={contextMenu.anchor}
+          openedBy={contextMenu.openedBy}
+          target={contextMenu.target}
+          sections={[...sectionCounts.keys()]}
+          onOpenNewTab={(bookmark) => {
+            closeContextMenu(contextMenu.openedBy === 'keyboard');
+            window.open(normalizeUrl(bookmark.url), '_blank', 'noopener,noreferrer');
+          }}
+          onCopyUrl={(bookmark) => {
+            closeContextMenu(contextMenu.openedBy === 'keyboard');
+            copyBookmarkUrl(bookmark);
+          }}
+          onEditBookmark={(bookmark) => {
+            closeContextMenu(false);
+            setBookmarkDialog({ mode: 'edit', bookmark });
+          }}
+          onMoveBookmark={(bookmark, targetSection) => {
+            closeContextMenu(false);
+            moveBookmarkSection(bookmark, targetSection);
+          }}
+          onDeleteBookmark={(bookmark) => {
+            closeContextMenu(false);
+            deleteBookmark(bookmark);
+          }}
+          onAddBookmarkToSection={(targetSection) => {
+            closeContextMenu(false);
+            setBookmarkDialog({ mode: 'add', initialSection: targetSection });
+          }}
+          onRenameSection={(targetSection) => {
+            closeContextMenu(false);
+            setSectionDialog({ mode: 'rename', section: targetSection });
+          }}
+          onRemoveSection={(targetSection) => {
+            closeContextMenu(false);
+            setSectionDialog({ mode: 'delete', section: targetSection });
+          }}
+          onReopenAt={reopenContextMenuAt}
+          onClose={closeContextMenu}
+        />
       )}
 
       {bookmarkDialog && (
