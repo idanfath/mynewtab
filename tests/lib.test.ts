@@ -16,7 +16,10 @@ import {
 import {
     BACKUP_KEY,
     STORAGE_KEY,
+    applyBookmarkSave,
     classifyStoredDataFailure,
+    findMatchingBookmark,
+    findMatchingBookmarkIndex,
     groupBookmarksBySection,
     insertBookmarkInSection,
     loadStoredBookmarks,
@@ -757,4 +760,190 @@ test('handles IPv6, IDN, non-default ports, repeated query params, and unsafe sc
     assert.equal(normalizeUrl('vbscript:msgbox(1)'), '');
     assert.equal(normalizeUrl('blob:https://example.com/123'), '');
     assert.equal(normalizeUrl('data:text/html,hi'), '');
+});
+
+test('allows editing a bookmark when another bookmark shares its URL identity, while still rejecting new or changed URL collisions', () => {
+    const gamesWplace: Bookmark = {
+        title: 'Wplace',
+        url: 'https://wplace.live/',
+        section: 'Games',
+    };
+    const pinnedWplace: Bookmark = {
+        title: 'Wplace',
+        url: 'https://wplace.live/',
+        section: 'Pinned',
+    };
+    const github: Bookmark = {
+        title: 'GitHub',
+        url: 'https://github.com/',
+        section: 'Dev',
+        alias: 'gh',
+    };
+    const directory = [gamesWplace, pinnedWplace, github];
+
+    // Exact bug reproduction: adding !bang shortcut + searchUrl to Pinned copy while Games copy shares URL
+    const editedPinned: Bookmark = {
+        ...pinnedWplace,
+        alias: 'aa',
+        searchUrl: 'https://wplace.live/search?q=%s',
+    };
+    const savedPinned = applyBookmarkSave(directory, editedPinned, pinnedWplace);
+    assert.equal(savedPinned.ok, true);
+    if (!savedPinned.ok) return;
+    assert.equal(savedPinned.bookmarks.length, 3);
+    assert.equal(savedPinned.bookmarks[0], gamesWplace);
+    assert.deepEqual(savedPinned.bookmarks[1], editedPinned);
+    assert.equal(savedPinned.bookmarks[2], github);
+    // Persisted result remains valid on reload
+    assert.deepEqual(
+        parseBookmarks(JSON.stringify(savedPinned.bookmarks)),
+        savedPinned.bookmarks,
+    );
+
+    // Re-saving Pinned copy with equivalent URL variant (same urlIdentity) and keeping its own !aa shortcut succeeds
+    const normalizedVariantSave = applyBookmarkSave(
+        savedPinned.bookmarks,
+        {
+            ...editedPinned,
+            url: 'https://WPLACE.live:443',
+            description: 'Collaborative pixel canvas',
+        },
+        editedPinned,
+    );
+    assert.equal(normalizedVariantSave.ok, true);
+
+    // Moving edited Pinned copy to another section while keeping same urlIdentity updates only that entry
+    const movedPinnedSave = applyBookmarkSave(
+        savedPinned.bookmarks,
+        { ...editedPinned, section: 'Favorites' },
+        editedPinned,
+    );
+    assert.equal(movedPinnedSave.ok, true);
+    if (movedPinnedSave.ok) {
+        assert.deepEqual(
+            movedPinnedSave.bookmarks.map((b) => `${b.section}:${b.title}`),
+            ['Games:Wplace', 'Dev:GitHub', 'Favorites:Wplace'],
+        );
+    }
+
+    // Assigning the same !aa shortcut to the Games copy is rejected
+    const collidingAlias = applyBookmarkSave(
+        savedPinned.bookmarks,
+        { ...gamesWplace, alias: 'aa' },
+        gamesWplace,
+    );
+    assert.deepEqual(collidingAlias, {
+        ok: false,
+        error: '“Wplace” already uses shortcut !aa.',
+    });
+
+    // Adding a brand-new bookmark with an already-used URL identity is rejected
+    const duplicateAdd = applyBookmarkSave(
+        directory,
+        { title: 'Wplace Copy', url: 'https://wplace.live', section: 'Creative' },
+        null,
+    );
+    assert.deepEqual(duplicateAdd, {
+        ok: false,
+        error: '“Wplace” already uses this URL.',
+    });
+
+    // Changing an existing bookmark's URL to collide with another bookmark's URL is rejected
+    const collidingUrlChange = applyBookmarkSave(
+        directory,
+        { ...github, url: 'https://wplace.live/' },
+        github,
+    );
+    assert.deepEqual(collidingUrlChange, {
+        ok: false,
+        error: '“Wplace” already uses this URL.',
+    });
+
+    // Changing one duplicate's URL to a brand-new non-colliding URL succeeds
+    const nonCollidingUrlChange = applyBookmarkSave(
+        directory,
+        { ...pinnedWplace, url: 'https://wplace.org/' },
+        pinnedWplace,
+    );
+    assert.equal(nonCollidingUrlChange.ok, true);
+});
+
+test('disambiguates detached bookmark references across duplicate URLs by section, title, and metadata', () => {
+    const gamesWplace: Bookmark = {
+        title: 'Wplace',
+        url: 'https://wplace.live/',
+        section: 'Games',
+    };
+    const pinnedWplaceA: Bookmark = {
+        title: 'Wplace',
+        url: 'https://wplace.live/',
+        section: 'Pinned',
+        subsection: 'Daily',
+    };
+    const pinnedWplaceB: Bookmark = {
+        title: 'Wplace',
+        url: 'https://wplace.live/',
+        section: 'Pinned',
+        subsection: 'Events',
+        alias: 'wp',
+    };
+    const list = [gamesWplace, pinnedWplaceA, pinnedWplaceB];
+
+    // Detached clone of Pinned/Events resolves index 2 (not index 0 Games or index 1 Daily)
+    const detachedPinnedB: Bookmark = { ...pinnedWplaceB };
+    assert.equal(findMatchingBookmarkIndex(list, detachedPinnedB), 2);
+    assert.equal(findMatchingBookmark(list, detachedPinnedB), pinnedWplaceB);
+
+    // Detached clone of Pinned/Wplace without subsection resolves Pinned over earlier Games entry
+    const detachedPinned: Bookmark = {
+        title: 'Wplace',
+        url: 'https://wplace.live',
+        section: 'Pinned',
+    };
+    assert.equal(findMatchingBookmarkIndex([gamesWplace, pinnedWplaceA], detachedPinned), 1);
+
+    // Saving via detached Pinned reference updates Pinned entry and leaves Games entry intact
+    const detachedSave = applyBookmarkSave(
+        [gamesWplace, { title: 'Wplace', url: 'https://wplace.live/', section: 'Pinned' }],
+        {
+            title: 'Wplace',
+            url: 'https://wplace.live/',
+            section: 'Pinned',
+            alias: 'aa',
+            searchUrl: 'https://wplace.live/search?q=%s',
+        },
+        detachedPinned,
+    );
+    assert.equal(detachedSave.ok, true);
+    if (detachedSave.ok) {
+        assert.equal(detachedSave.bookmarks[0], gamesWplace);
+        assert.equal(detachedSave.bookmarks[0].alias, undefined);
+        assert.equal(detachedSave.bookmarks[1].section, 'Pinned');
+        assert.equal(detachedSave.bookmarks[1].alias, 'aa');
+    }
+
+    // External title edit in same section still prefers matching section over another section's old title
+    const renamedInPinned: Bookmark = {
+        title: 'Wplace Live',
+        url: 'https://wplace.live/',
+        section: 'Pinned',
+    };
+    assert.equal(
+        findMatchingBookmark([gamesWplace, renamedInPinned], detachedPinned),
+        renamedInPinned,
+    );
+
+    // External move of uniquely-titled bookmark still prefers matching title over unrelated copy
+    const movedDistinctTitle: Bookmark = {
+        title: 'Wplace Official',
+        url: 'https://wplace.live/',
+        section: 'Favorites',
+    };
+    assert.equal(
+        findMatchingBookmark(
+            [gamesWplace, movedDistinctTitle],
+            { title: 'Wplace Official', url: 'https://wplace.live/', section: 'Pinned' },
+        ),
+        movedDistinctTitle,
+    );
 });

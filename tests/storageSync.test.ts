@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { STORAGE_KEY, type Bookmark } from '../src/bookmarks.ts';
+import { STORAGE_KEY, findMatchingBookmark, type Bookmark } from '../src/bookmarks.ts';
 import {
   computeBookmarksHash,
   loadSnapshots,
@@ -270,4 +270,34 @@ test('handles rapid external writes, external storage clear (newValue = null), a
     },
   };
   assert.equal(detectDiskConflict(blockedStorage, baseHash, localBase), null);
+});
+
+test('reconcileViewAfterSync and external reload disambiguate duplicate-URL bookmarks across sections', () => {
+  const gamesWplace: Bookmark = { title: 'Wplace', url: 'https://wplace.live/', section: 'Games' };
+  const pinnedWplace: Bookmark = { title: 'Wplace', url: 'https://wplace.live/', section: 'Pinned' };
+
+  const externalRaw = JSON.stringify([
+    gamesWplace,
+    { ...pinnedWplace, description: 'Updated in other tab' },
+    C,
+  ]);
+
+  const synced = evaluateExternalBookmarkChange({
+    rawNewValue: externalRaw,
+    currentBookmarks: [gamesWplace, pinnedWplace],
+    currentSection: 'Pinned',
+    currentActiveBookmark: pinnedWplace,
+    isEditModalOpen: false,
+    modalBaseHash: null,
+    modalBaseBookmarks: null,
+  });
+
+  assert.equal(synced.kind, 'background-sync');
+  if (synced.kind !== 'background-sync') return;
+  assert.equal(synced.section, 'Pinned');
+  assert.equal(synced.activeBookmark?.section, 'Pinned');
+  assert.equal(synced.activeBookmark?.description, 'Updated in other tab');
+
+  const reloadedTarget = findMatchingBookmark(synced.bookmarks, pinnedWplace);
+  assert.equal(reloadedTarget, synced.bookmarks[1]);
 });

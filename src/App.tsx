@@ -62,6 +62,8 @@ import {
 import {
   BACKUP_KEY,
   STORAGE_KEY,
+  applyBookmarkSave,
+  findMatchingBookmark,
   groupBookmarksBySection,
   insertBookmarkInSection,
   moveBookmarkToSection,
@@ -1021,8 +1023,7 @@ function App() {
     }
 
     if (bookmarkDialog?.mode === 'edit') {
-      const targetId = urlIdentity(bookmarkDialog.bookmark.url);
-      const matched = ext.find((item) => urlIdentity(item.url) === targetId);
+      const matched = findMatchingBookmark(ext, bookmarkDialog.bookmark);
       if (matched) {
         setBookmarkDialog({
           mode: 'edit',
@@ -1531,50 +1532,9 @@ function App() {
       ? bookmarkDialog.bookmark
       : null;
 
-    let editingIndex = -1;
-    if (editingBookmark) {
-      editingIndex = bookmarks.indexOf(editingBookmark);
-      if (editingIndex < 0) {
-        const editingIdentity = urlIdentity(editingBookmark.url);
-        editingIndex = bookmarks.findIndex(
-          (item) => urlIdentity(item.url) === editingIdentity,
-        );
-      }
-    }
-    const resolvedEditing = editingIndex >= 0 ? bookmarks[editingIndex] : null;
-
-    const bookmarkIdentity = urlIdentity(nextBookmark.url);
-    const duplicate = bookmarks.find(
-      (bookmark, index) => index !== editingIndex
-        && urlIdentity(bookmark.url) === bookmarkIdentity,
-    );
-    if (duplicate) return `“${duplicate.title}” already uses this URL.`;
-
-    const nextAlias = normalizeAlias(nextBookmark.alias ?? '');
-    if (nextAlias) {
-      const duplicateAlias = bookmarks.find(
-        (bookmark, index) =>
-          index !== editingIndex
-          && normalizeAlias(bookmark.alias ?? '') === nextAlias,
-      );
-      if (duplicateAlias) {
-        return `“${duplicateAlias.title}” already uses shortcut !${nextAlias}.`;
-      }
-    }
-
-    let nextBookmarks: Bookmark[];
-    if (resolvedEditing) {
-      if (nextBookmark.section === resolvedEditing.section) {
-        nextBookmarks = bookmarks.map((bookmark, index) =>
-          index === editingIndex ? nextBookmark : bookmark,
-        );
-      } else {
-        const remaining = bookmarks.filter((_bookmark, index) => index !== editingIndex);
-        nextBookmarks = insertBookmarkInSection(remaining, nextBookmark);
-      }
-    } else {
-      nextBookmarks = insertBookmarkInSection(bookmarks, nextBookmark);
-    }
+    const saveAttempt = applyBookmarkSave(bookmarks, nextBookmark, editingBookmark);
+    if (!saveAttempt.ok) return saveAttempt.error;
+    const nextBookmarks = saveAttempt.bookmarks;
 
     const snapshotRequests: SnapshotRequest[] = [];
     if (options?.overwriteExternalConflict && conflictForBackup) {

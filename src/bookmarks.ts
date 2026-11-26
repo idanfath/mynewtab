@@ -1,5 +1,5 @@
 import Fuse from 'fuse.js';
-import { normalizeAlias, normalizeSearchUrl, normalizeUrl } from './lib.ts';
+import { normalizeAlias, normalizeSearchUrl, normalizeUrl, urlIdentity } from './lib.ts';
 
 export interface Bookmark {
     title: string;
@@ -268,7 +268,7 @@ export function searchBookmarks(bookmarks: Bookmark[], query: string): Bookmark[
         .map(([bookmark]) => bookmark);
 }
 
-export function groupBookmarksBySection(bookmarks: Bookmark[]): Bookmark[] {
+export function groupBookmarksBySection(bookmarks: readonly Bookmark[]): Bookmark[] {
     const groups = new Map<string, Bookmark[]>();
     for (const bookmark of bookmarks) {
         let group = groups.get(bookmark.section);
@@ -282,7 +282,7 @@ export function groupBookmarksBySection(bookmarks: Bookmark[]): Bookmark[] {
 }
 
 export function insertBookmarkInSection(
-    bookmarks: Bookmark[],
+    bookmarks: readonly Bookmark[],
     bookmark: Bookmark,
 ): Bookmark[] {
     const grouped = groupBookmarksBySection(bookmarks);
@@ -298,6 +298,147 @@ export function insertBookmarkInSection(
     const next = [...grouped];
     next.splice(lastIndex + 1, 0, bookmark);
     return next;
+}
+
+export function findMatchingBookmarkIndex(
+    bookmarks: readonly Bookmark[],
+    target: Bookmark,
+): number {
+    const exactRefIndex = bookmarks.indexOf(target);
+    if (exactRefIndex >= 0) return exactRefIndex;
+
+    const targetIdentity = urlIdentity(target.url);
+    if (!targetIdentity) return -1;
+
+    const targetSection = target.section.trim();
+    const targetSectionLower = targetSection.toLocaleLowerCase();
+    const targetTitle = target.title.trim();
+    const targetSubsection = (target.subsection ?? '').trim();
+    const targetAlias = normalizeAlias(target.alias ?? '');
+
+    let fullMatchIdx = -1;
+    let exactSectionTitleIdx = -1;
+    let lowerSectionTitleIdx = -1;
+    let sameSectionIdx = -1;
+    let sameTitleIdx = -1;
+    let anyIdentityIdx = -1;
+
+    for (let index = 0; index < bookmarks.length; index += 1) {
+        const item = bookmarks[index];
+        if (urlIdentity(item.url) !== targetIdentity) continue;
+
+        if (anyIdentityIdx < 0) anyIdentityIdx = index;
+
+        const itemSection = item.section.trim();
+        const itemSectionLower = itemSection.toLocaleLowerCase();
+        const itemTitle = item.title.trim();
+        const sameExactSection = itemSection === targetSection;
+        const sameLowerSection = itemSectionLower === targetSectionLower;
+        const sameExactTitle = itemTitle === targetTitle;
+
+        if (sameExactSection && sameExactTitle) {
+            if (exactSectionTitleIdx < 0) exactSectionTitleIdx = index;
+            if (
+                fullMatchIdx < 0
+                && (item.subsection ?? '').trim() === targetSubsection
+                && normalizeAlias(item.alias ?? '') === targetAlias
+            ) {
+                fullMatchIdx = index;
+            }
+        }
+        if (lowerSectionTitleIdx < 0 && sameLowerSection && sameExactTitle) {
+            lowerSectionTitleIdx = index;
+        }
+        if (sameSectionIdx < 0 && sameLowerSection) {
+            sameSectionIdx = index;
+        }
+        if (sameTitleIdx < 0 && sameExactTitle) {
+            sameTitleIdx = index;
+        }
+    }
+
+    if (fullMatchIdx >= 0) return fullMatchIdx;
+    if (exactSectionTitleIdx >= 0) return exactSectionTitleIdx;
+    if (lowerSectionTitleIdx >= 0) return lowerSectionTitleIdx;
+    if (sameSectionIdx >= 0) return sameSectionIdx;
+    if (sameTitleIdx >= 0) return sameTitleIdx;
+    return anyIdentityIdx;
+}
+
+export function findMatchingBookmark(
+    bookmarks: readonly Bookmark[],
+    target: Bookmark,
+): Bookmark | null {
+    const index = findMatchingBookmarkIndex(bookmarks, target);
+    return index >= 0 ? bookmarks[index] : null;
+}
+
+export type SaveBookmarkResult =
+    | { ok: true; bookmarks: Bookmark[] }
+    | { ok: false; error: string };
+
+export function applyBookmarkSave(
+    bookmarks: readonly Bookmark[],
+    nextBookmark: Bookmark,
+    editingBookmark: Bookmark | null,
+): SaveBookmarkResult {
+    const bookmarkIdentity = urlIdentity(nextBookmark.url);
+    if (!bookmarkIdentity) {
+        return { ok: false, error: 'Enter a valid http:// or https:// address.' };
+    }
+
+    const editingIndex = editingBookmark
+        ? findMatchingBookmarkIndex(bookmarks, editingBookmark)
+        : -1;
+    const resolvedEditing = editingIndex >= 0 ? bookmarks[editingIndex] : null;
+    const editingIdentity = resolvedEditing ? urlIdentity(resolvedEditing.url) : '';
+
+    if (!resolvedEditing || bookmarkIdentity !== editingIdentity) {
+        const duplicate = bookmarks.find(
+            (bookmark, index) =>
+                index !== editingIndex
+                && urlIdentity(bookmark.url) === bookmarkIdentity,
+        );
+        if (duplicate) {
+            return {
+                ok: false,
+                error: `“${duplicate.title}” already uses this URL.`,
+            };
+        }
+    }
+
+    const nextAlias = normalizeAlias(nextBookmark.alias ?? '');
+    if (nextAlias) {
+        const duplicateAlias = bookmarks.find(
+            (bookmark, index) =>
+                index !== editingIndex
+                && normalizeAlias(bookmark.alias ?? '') === nextAlias,
+        );
+        if (duplicateAlias) {
+            return {
+                ok: false,
+                error: `“${duplicateAlias.title}” already uses shortcut !${nextAlias}.`,
+            };
+        }
+    }
+
+    let nextBookmarks: Bookmark[];
+    if (resolvedEditing) {
+        if (nextBookmark.section === resolvedEditing.section) {
+            nextBookmarks = bookmarks.map((bookmark, index) =>
+                index === editingIndex ? nextBookmark : bookmark,
+            );
+        } else {
+            const remaining = bookmarks.filter(
+                (_bookmark, index) => index !== editingIndex,
+            );
+            nextBookmarks = insertBookmarkInSection(remaining, nextBookmark);
+        }
+    } else {
+        nextBookmarks = insertBookmarkInSection(bookmarks, nextBookmark);
+    }
+
+    return { ok: true, bookmarks: nextBookmarks };
 }
 
 export function moveBookmarkToSection(

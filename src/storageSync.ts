@@ -1,9 +1,13 @@
-import { STORAGE_KEY, parseBookmarks, type Bookmark } from './bookmarks.ts';
+import {
+  STORAGE_KEY,
+  findMatchingBookmark,
+  parseBookmarks,
+  type Bookmark,
+} from './bookmarks.ts';
 import {
   normalizeAlias,
   normalizeSearchUrl,
   normalizeUrl,
-  urlIdentity,
 } from './lib.ts';
 import { cloneWithoutProto } from './bookmarkMerge.ts';
 import {
@@ -125,13 +129,9 @@ export function reconcileViewAfterSync(
     ? currentSection
     : 'All';
 
-  let nextActive: Bookmark | null = null;
-  if (currentActiveBookmark) {
-    const activeIdentity = urlIdentity(currentActiveBookmark.url);
-    nextActive = nextBookmarks.find(
-      (bookmark) => urlIdentity(bookmark.url) === activeIdentity,
-    ) ?? null;
-  }
+  const nextActive = currentActiveBookmark
+    ? findMatchingBookmark(nextBookmarks, currentActiveBookmark)
+    : null;
 
   return { section: nextSection, activeBookmark: nextActive };
 }
