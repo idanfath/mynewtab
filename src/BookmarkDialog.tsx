@@ -1,13 +1,21 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { normalizeAlias, normalizeSearchUrl, normalizeUrl } from './lib.ts';
 import type { Bookmark } from './bookmarks.ts';
+import type { ExternalSyncConflict } from './storageSync.ts';
+import { ExternalConflictBanner } from './notices.tsx';
+import { focusConflictBanner, trapDialogTabKey } from './dialogFocus.ts';
 
 interface BookmarkDialogProps {
   bookmark?: Bookmark;
   initialSection: string;
   sections: string[];
+  conflict: ExternalSyncConflict | null;
+  onLoadExternal: () => void;
   onCancel: () => void;
-  onSave: (bookmark: Bookmark) => string | null;
+  onSave: (
+    bookmark: Bookmark,
+    options?: { overwriteExternalConflict?: boolean },
+  ) => string | null;
 }
 
 function splitList(value: string): string[] | undefined {
@@ -20,7 +28,7 @@ function splitList(value: string): string[] | undefined {
 
 function setOptionalString(
   bookmark: Bookmark,
-  field: 'subsection' | 'description' | 'iconUrl' | 'tier' | 'product',
+  field: 'subsection' | 'description' | 'tier' | 'product',
   value: string,
 ) {
   const cleaned = value.trim();
@@ -42,9 +50,12 @@ export default function BookmarkDialog({
   bookmark,
   initialSection,
   sections,
+  conflict,
+  onLoadExternal,
   onCancel,
   onSave,
 }: BookmarkDialogProps) {
+  const dialogRef = useRef<HTMLElement>(null);
   const [title, setTitle] = useState(bookmark?.title ?? '');
   const [url, setUrl] = useState(bookmark?.url ?? '');
   const [section, setSection] = useState(bookmark?.section ?? initialSection);
@@ -62,31 +73,36 @@ export default function BookmarkDialog({
   const [cons, setCons] = useState(bookmark?.cons?.join(', ') ?? '');
   const [error, setError] = useState('');
 
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const buildValidatedBookmark = (): Bookmark | null => {
     const cleanedTitle = title.trim();
     const cleanedUrl = url.trim();
     const cleanedSection = section.trim();
 
     if (!cleanedTitle) {
       setError('Add a bookmark title.');
-      return;
+      return null;
     }
     if (!normalizeUrl(cleanedUrl)) {
       setError('Enter a valid http:// or https:// address.');
-      return;
+      return null;
     }
     if (!cleanedSection) {
       setError('Choose or enter a section.');
-      return;
+      return null;
     }
     if (cleanedSection.toLocaleLowerCase() === 'all') {
       setError('“All” is reserved for the complete directory.');
-      return;
+      return null;
     }
-    if (iconUrl.trim() && !normalizeUrl(iconUrl)) {
-      setError('Icon URL must use http:// or https://.');
-      return;
+
+    const cleanedIcon = iconUrl.trim();
+    let normalizedIcon = '';
+    if (cleanedIcon) {
+      normalizedIcon = normalizeUrl(cleanedIcon);
+      if (!normalizedIcon) {
+        setError('Icon URL must use http:// or https://.');
+        return null;
+      }
     }
 
     const cleanedAlias = alias.trim();
@@ -96,15 +112,15 @@ export default function BookmarkDialog({
 
     if (cleanedAlias && !normalizedAlias) {
       setError('Shortcut must be 1–32 letters, numbers, or hyphens (e.g. gh or my-docs).');
-      return;
+      return null;
     }
     if (cleanedSearchUrl && !normalizedSearchUrl) {
       setError('Site search URL must be a valid http:// or https:// address containing %s.');
-      return;
+      return null;
     }
     if (normalizedSearchUrl && !normalizedAlias) {
       setError('Add a shortcut (!bang) to use a site search URL.');
-      return;
+      return null;
     }
 
     const resolvedSection = sections.find(
@@ -125,7 +141,11 @@ export default function BookmarkDialog({
 
     setOptionalString(nextBookmark, 'subsection', subsection);
     setOptionalString(nextBookmark, 'description', description);
-    setOptionalString(nextBookmark, 'iconUrl', iconUrl);
+    if (normalizedIcon) {
+      nextBookmark.iconUrl = normalizedIcon;
+    } else {
+      delete nextBookmark.iconUrl;
+    }
     setOptionalString(nextBookmark, 'tier', tier);
     setOptionalString(nextBookmark, 'product', product);
     setOptionalList(nextBookmark, 'categories', categories);
@@ -134,8 +154,24 @@ export default function BookmarkDialog({
     setOptionalList(nextBookmark, 'pros', pros);
     setOptionalList(nextBookmark, 'cons', cons);
 
-    const saveError = onSave(nextBookmark);
+    return nextBookmark;
+  };
+
+  const commitSave = (overwriteExternalConflict: boolean) => {
+    const nextBookmark = buildValidatedBookmark();
+    if (!nextBookmark) return;
+    const saveError = onSave(nextBookmark, { overwriteExternalConflict });
     if (saveError) setError(saveError);
+  };
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (conflict) {
+      focusConflictBanner(dialogRef.current);
+      setError('Resolve the external tab conflict above first.');
+      return;
+    }
+    commitSave(false);
   };
 
   return (
@@ -146,12 +182,29 @@ export default function BookmarkDialog({
       }}
     >
       <section
+        ref={dialogRef}
+        tabIndex={-1}
         className="app-form-dialog app-bookmark-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="app-bookmark-dialog-title"
         onKeyDown={(event) => {
-          if (event.key === 'Escape') onCancel();
+          if (event.nativeEvent.isComposing || event.defaultPrevented) return;
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            onCancel();
+            return;
+          }
+          if (event.key === 'Enter' && conflict !== null) {
+            const target = event.target instanceof HTMLElement ? event.target : null;
+            if (!target || !target.closest('.app-conflict-banner, button, textarea, summary')) {
+              event.preventDefault();
+              focusConflictBanner(dialogRef.current);
+              setError('Resolve the external tab conflict above first.');
+              return;
+            }
+          }
+          trapDialogTabKey(event, dialogRef.current);
         }}
       >
         <form onSubmit={submit}>
@@ -166,6 +219,20 @@ export default function BookmarkDialog({
               Cancel
             </button>
           </header>
+
+          {conflict && (
+            <ExternalConflictBanner
+              conflict={conflict}
+              onLoadExternal={() => {
+                setError('');
+                onLoadExternal();
+              }}
+              onSaveMine={() => {
+                setError('');
+                commitSave(true);
+              }}
+            />
+          )}
 
           <div className="app-form-body">
             <div className="app-form-grid">
@@ -266,7 +333,7 @@ export default function BookmarkDialog({
           </div>
 
           <footer>
-            <button type="submit" className="is-primary">
+            <button type="submit" className="is-primary" disabled={conflict !== null}>
               {bookmark ? 'Save changes' : 'Add bookmark'}
             </button>
           </footer>

@@ -31,9 +31,13 @@ import {
     BOOKMARK_DRAG_TYPE,
     SECTION_DRAG_TYPE,
     detectDropMode,
+    isBookmarkFileMime,
+    isBookmarkFileName,
     readDroppedUrl,
     resolveDropSection,
+    type DataTransferItemLike,
 } from '../src/dropHandlers.ts';
+import { formatBookmarkError } from '../src/formatBookmarkError.ts';
 import { buildInitialState, loadInitialState } from '../src/useBookmarks.ts';
 
 function memoryStorage(values = new Map<string, string>()) {
@@ -645,4 +649,112 @@ test('starts empty instead of crashing when storage access is blocked', (context
     });
 
     assert.deepEqual(loadInitialState(), { bookmarks: [], error: null });
+});
+
+test('recognizes bookmark file extensions, MIME types, and DataTransfer items drop modes', () => {
+    assert.equal(isBookmarkFileName('bookmarks.json'), true);
+    assert.equal(isBookmarkFileName('Chrome_Bookmarks.HTML'), true);
+    assert.equal(isBookmarkFileName('saved.htm'), true);
+    assert.equal(isBookmarkFileName('site.webloc'), false);
+    assert.equal(isBookmarkFileName('photo.png'), false);
+
+    assert.equal(isBookmarkFileMime('application/json'), true);
+    assert.equal(isBookmarkFileMime('application/json; charset=utf-8'), true);
+    assert.equal(isBookmarkFileMime('TEXT/HTML'), true);
+    assert.equal(isBookmarkFileMime('text/html; charset=utf-8'), true);
+    assert.equal(isBookmarkFileMime(' TEXT/HTML ; charset=UTF-8 '), true);
+    assert.equal(isBookmarkFileMime('text/plain; charset=utf-8'), false);
+    assert.equal(isBookmarkFileMime('image/png'), false);
+    assert.equal(isBookmarkFileMime(''), false);
+
+    const withItems = (types: string[], items: DataTransferItemLike[]) => ({
+        types,
+        items,
+    });
+
+    // Browser URL drag attaching virtual .webloc/.url file (type '') resolves to 'url'
+    assert.equal(
+        detectDropMode(
+            withItems(['Files', 'text/uri-list'], [{ kind: 'file', type: '' }]),
+            true,
+        ),
+        'url',
+    );
+    // Linked image drag (image/png + text/uri-list) resolves to 'url'
+    assert.equal(
+        detectDropMode(
+            withItems(['Files', 'text/uri-list'], [{ kind: 'file', type: 'image/png' }]),
+            true,
+        ),
+        'url',
+    );
+    // Linux file-manager HTML/JSON drag with text/uri-list resolves to 'file'
+    assert.equal(
+        detectDropMode(
+            withItems(['Files', 'text/uri-list'], [{ kind: 'file', type: 'text/html' }]),
+            true,
+        ),
+        'file',
+    );
+    assert.equal(
+        detectDropMode(
+            withItems(['Files', 'text/uri-list'], [{ kind: 'file', type: 'application/json' }]),
+            true,
+        ),
+        'file',
+    );
+    // Desktop file drag without text/uri-list resolves to 'file'
+    assert.equal(
+        detectDropMode(
+            withItems(['Files'], [{ kind: 'file', type: '' }]),
+            true,
+        ),
+        'file',
+    );
+});
+
+test('formats HTML, empty-file, unrecognized-format, and reserved-section errors cleanly', () => {
+    assert.match(
+        formatBookmarkError(new Error('Unrecognized bookmark file format.'), 'x', 'Import').detail,
+        /\.json.*\.html/,
+    );
+    assert.match(
+        formatBookmarkError(new Error('No bookmarks found in HTML file.'), '', 'Import').detail,
+        /HTML file/,
+    );
+    assert.match(
+        formatBookmarkError(new Error('No bookmarks found in JSON file.'), '[]', 'Import').detail,
+        /JSON file/,
+    );
+    assert.equal(
+        formatBookmarkError(
+            new Error('No valid http:// or https:// bookmarks found (skipped 2 non-web links).'),
+            '',
+            'Import',
+        ).detail,
+        'No valid http:// or https:// bookmarks found (skipped 2 non-web links).',
+    );
+    assert.equal(
+        formatBookmarkError(
+            new Error('Bookmark 2: section “All” is reserved for the complete directory.'),
+            '[]',
+            'Save',
+        ).detail,
+        'Bookmark 2: section “All” is reserved for the complete directory.',
+    );
+});
+
+test('handles IPv6, IDN, non-default ports, repeated query params, and unsafe schemes in normalizeUrl and urlIdentity', () => {
+    assert.equal(normalizeUrl('https://[::1]:8080/api'), 'https://[::1]:8080/api');
+    assert.equal(urlIdentity('https://[::1]:8080/api/'), urlIdentity('https://[::1]:8080/api'));
+    assert.equal(normalizeUrl('https://münchen.de/path'), 'https://xn--mnchen-3ya.de/path');
+    assert.equal(urlIdentity('https://MÜNCHEN.de:443/path/'), urlIdentity('https://xn--mnchen-3ya.de/path'));
+    assert.notEqual(urlIdentity('https://example.com:8443/a'), urlIdentity('https://example.com/a'));
+    assert.equal(
+        urlIdentity('https://example.com/?b=2&a=1&a=0'),
+        urlIdentity('https://example.com/?a=1&a=0&b=2'),
+    );
+    assert.equal(normalizeUrl('vbscript:msgbox(1)'), '');
+    assert.equal(normalizeUrl('blob:https://example.com/123'), '');
+    assert.equal(normalizeUrl('data:text/html,hi'), '');
 });

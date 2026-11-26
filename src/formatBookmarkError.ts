@@ -108,6 +108,41 @@ export function formatBookmarkError(
     };
   }
 
+  if (message === 'Unrecognized bookmark file format.') {
+    return {
+      title,
+      detail: 'Choose a .json bookmark export or a browser-exported .html bookmark file.',
+    };
+  }
+
+  if (message === 'No bookmarks found in HTML file.') {
+    return {
+      title,
+      detail: 'No bookmarks were found in that HTML file.',
+    };
+  }
+
+  if (message === 'No bookmarks found in JSON file.') {
+    return {
+      title,
+      detail: 'No bookmarks were found in that JSON file.',
+    };
+  }
+
+  if (/^No valid http:\/\/ or https:\/\/ bookmarks found/.test(message)) {
+    return {
+      title,
+      detail: message,
+    };
+  }
+
+  if (/^Bookmark \d+: section “All” is reserved/.test(message)) {
+    return {
+      title,
+      detail: message,
+    };
+  }
+
   const duplicateAlias = message.match(
     /^Bookmark (\d+)\.alias duplicates "([^"]+)" from Bookmark (\d+) \(([\s\S]+)\)\.$/,
   );

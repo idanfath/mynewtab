@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
   DEFAULT_OMNIBAR_SETTINGS,
   OMNIBAR_BACKUP_KEY,
@@ -80,9 +80,21 @@ export function useOmnibarSettings() {
     return true;
   };
 
+  const refreshOmnibarFromStorage = useCallback(() => {
+    try {
+      const { settings, recovery } = loadStoredOmnibarSettings(localStorage);
+      if (!recovery) {
+        setOmnibarSettings(settings);
+      }
+    } catch {
+      // ignore blocked storage
+    }
+  }, []);
+
   return {
     omnibarSettings,
     initialOmnibarError: initialState.error,
     persistOmnibarSettings,
+    refreshOmnibarFromStorage,
   };
 }
