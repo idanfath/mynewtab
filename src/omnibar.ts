@@ -54,6 +54,16 @@ export interface OmnibarSettings {
   customSearchName?: string;
   customSearchUrl?: string;
   customBangs: CustomBang[];
+  disabledBuiltInBangs?: string[];
+}
+
+export interface EmptyOmnibarViewState {
+  isSearchExpanded: boolean;
+  isDrawerOpen: boolean;
+  displayedAction: OmnibarAction;
+  triggerTabIndex: -1 | undefined;
+  inputTabIndex: -1 | undefined;
+  resultTabIndex: -1 | undefined;
 }
 
 export type OmnibarActionKind =
@@ -224,6 +234,34 @@ const VALID_ENGINE_IDS = new Set<SearchEnginePresetId>([
   'perplexity',
   'custom',
 ]);
+
+const BUILT_IN_BANG_TRIGGERS = new Set<string>(
+  BUILT_IN_BANGS.map((bang) => bang.trigger),
+);
+
+export function isBuiltInBangEnabled(
+  settings: OmnibarSettings,
+  trigger: string,
+): boolean {
+  if (!settings.disabledBuiltInBangs?.length) return true;
+  const normalized = normalizeAlias(trigger);
+  if (!normalized) return false;
+  return !settings.disabledBuiltInBangs.some(
+    (disabled) => normalizeAlias(disabled) === normalized,
+  );
+}
+
+export function getEnabledBuiltInBangs(
+  settings: OmnibarSettings,
+): BuiltInBang[] {
+  if (!settings.disabledBuiltInBangs?.length) return [...BUILT_IN_BANGS];
+  const disabledSet = new Set(
+    settings.disabledBuiltInBangs
+      .map((trigger) => normalizeAlias(trigger))
+      .filter(Boolean),
+  );
+  return BUILT_IN_BANGS.filter((bang) => !disabledSet.has(bang.trigger));
+}
 
 const DNS_LABEL_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
 
@@ -414,6 +452,36 @@ export function parseOmnibarSettings(content: string): OmnibarSettings {
     });
 
     result.customBangs = customBangs;
+  }
+
+  if (record.disabledBuiltInBangs !== undefined) {
+    if (!Array.isArray(record.disabledBuiltInBangs)) {
+      throw new Error('Omnibar disabledBuiltInBangs must be an array.');
+    }
+    const disabledSet = new Set<string>();
+    record.disabledBuiltInBangs.forEach((entry: unknown, idx: number) => {
+      if (typeof entry !== 'string') {
+        throw new Error(
+          `Disabled built-in bang ${idx + 1} must be a string.`,
+        );
+      }
+      const normalized = normalizeAlias(entry);
+      if (!normalized) {
+        throw new Error(
+          `Disabled built-in bang ${idx + 1} must be a valid bang trigger.`,
+        );
+      }
+      if (BUILT_IN_BANG_TRIGGERS.has(normalized)) {
+        disabledSet.add(normalized);
+      }
+    });
+
+    const orderedDisabled = BUILT_IN_BANGS
+      .map((bang) => bang.trigger)
+      .filter((trigger) => disabledSet.has(trigger));
+    if (orderedDisabled.length > 0) {
+      result.disabledBuiltInBangs = orderedDisabled;
+    }
   }
 
   return result;
@@ -668,6 +736,7 @@ export function resolveOmnibar(
   if (rawQuery.trim() === '') return null;
 
   const activeEngine = getActiveSearchEngine(settings);
+  const enabledBuiltInBangs = getEnabledBuiltInBangs(settings);
   const trimmedStart = rawQuery.trimStart();
 
   // Level 1: Explicit !bang syntax
@@ -693,7 +762,7 @@ export function resolveOmnibar(
         allTriggers.push(trigger);
       }
     }
-    for (const builtIn of BUILT_IN_BANGS) {
+    for (const builtIn of enabledBuiltInBangs) {
       if (!seen.has(builtIn.trigger)) {
         seen.add(builtIn.trigger);
         allTriggers.push(builtIn.trigger);
@@ -702,15 +771,17 @@ export function resolveOmnibar(
 
     // 1A: Bare '!'
     if (rawToken === '' && !hasWhitespace) {
-      const firstTrigger = allTriggers[0] ?? 'gh';
+      const firstTrigger = allTriggers[0];
       return {
         kind: 'bang-incomplete',
         url: activeEngine.homeUrl,
         title: 'Type a !bang shortcut',
-        subtitle: allTriggers.slice(0, 6).map((t) => `!${t}`).join(' · '),
+        subtitle: allTriggers.length > 0
+          ? allTriggers.slice(0, 6).map((t) => `!${t}`).join(' · ')
+          : 'No active !bang shortcuts · Enable or add in Search settings',
         badge: '!BANG',
         autoSelect: true,
-        tabCompletion: `!${firstTrigger} `,
+        tabCompletion: firstTrigger ? `!${firstTrigger} ` : undefined,
       };
     }
 
@@ -757,7 +828,7 @@ export function resolveOmnibar(
           };
         }
 
-        const builtInMatch = BUILT_IN_BANGS.find((b) => b.trigger === token);
+        const builtInMatch = enabledBuiltInBangs.find((b) => b.trigger === token);
         if (builtInMatch) {
           return {
             kind: 'bang-jump',
@@ -856,7 +927,7 @@ export function resolveOmnibar(
           };
         }
 
-        const builtInMatch = BUILT_IN_BANGS.find((b) => b.trigger === token);
+        const builtInMatch = enabledBuiltInBangs.find((b) => b.trigger === token);
         if (builtInMatch) {
           return {
             kind: 'bang-jump',
@@ -928,7 +999,7 @@ export function resolveOmnibar(
       );
       if (bookmarkNoSearch) {
         const bookmarkHost = safeHostname(bookmarkNoSearch.url);
-        const builtIn = BUILT_IN_BANGS.find((entry) => entry.trigger === token);
+        const builtIn = enabledBuiltInBangs.find((entry) => entry.trigger === token);
         let url: string;
         let subtitle: string;
 
@@ -963,7 +1034,7 @@ export function resolveOmnibar(
       }
 
       // 4. BuiltInBang
-      const builtInMatch = BUILT_IN_BANGS.find((b) => b.trigger === token);
+      const builtInMatch = enabledBuiltInBangs.find((b) => b.trigger === token);
       if (builtInMatch) {
         const url = buildSearchUrl(builtInMatch.searchUrl, q);
         return {
@@ -1157,4 +1228,34 @@ export function resolveTabCompletion(
   }
 
   return null;
+}
+
+export function resolveEmptyOmnibarState(
+  rawQuery: string,
+  searchOpen: boolean,
+  dropActive: boolean,
+  omnibarAction: OmnibarAction | null,
+  lastOmnibarAction: OmnibarAction | null,
+  settings: OmnibarSettings,
+): EmptyOmnibarViewState {
+  const isSearchExpanded = searchOpen || Boolean(rawQuery);
+  const isDrawerOpen = omnibarAction !== null;
+  const activeEngine = getActiveSearchEngine(settings);
+  const fallbackAction: OmnibarAction = {
+    kind: 'web-search',
+    url: activeEngine.homeUrl,
+    title: `Search ${activeEngine.label}`,
+    subtitle: `${stripWww(safeHostname(activeEngine.homeUrl))} · Enter to search web`,
+    badge: activeEngine.shortBadge,
+    autoSelect: true,
+  };
+
+  return {
+    isSearchExpanded,
+    isDrawerOpen,
+    displayedAction: omnibarAction ?? lastOmnibarAction ?? fallbackAction,
+    triggerTabIndex: dropActive || isSearchExpanded ? -1 : undefined,
+    inputTabIndex: dropActive || !isSearchExpanded ? -1 : undefined,
+    resultTabIndex: dropActive || !isDrawerOpen ? -1 : undefined,
+  };
 }

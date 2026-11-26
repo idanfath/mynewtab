@@ -27,6 +27,7 @@ import {
   buildWebSearchUrl,
   getActiveSearchEngine,
   getOmnibarGlyph,
+  resolveEmptyOmnibarState,
   resolveOmnibar,
   resolveTabCompletion,
   type OmnibarAction,
@@ -282,6 +283,13 @@ function App() {
     () => resolveOmnibar(query, bookmarks, omnibarSettings, matches),
     [query, bookmarks, omnibarSettings, matches],
   );
+  const [lastOmnibarAction, setLastOmnibarAction] = useState<OmnibarAction | null>(null);
+
+  useEffect(() => {
+    if (omnibarAction) {
+      setLastOmnibarAction(omnibarAction);
+    }
+  }, [omnibarAction]);
 
   const validOverride = useMemo<SelectionOverride>(() => {
     if (!selectionOverride) return null;
@@ -1264,6 +1272,15 @@ function App() {
     const dropActive = dropMode !== null;
     const dropHeading = dropMode === 'url' ? URL_DROP_HEADING : DROP_HEADING;
     const dropCopy = dropMode === 'url' ? URL_DROP_COPY : DROP_COPY;
+    const emptyOmnibar = resolveEmptyOmnibarState(
+      query,
+      searchOpen,
+      dropActive,
+      omnibarAction,
+      lastOmnibarAction,
+      omnibarSettings,
+    );
+    const emptyDisplayedAction = emptyOmnibar.displayedAction;
 
     return (
       <main
@@ -1333,13 +1350,36 @@ function App() {
             style={{ transitionDuration: `${TYPEWRITER_DURATION}ms` }}
           >
             <div className="app-empty-omnibar-bar">
-              {searchOpen || Boolean(query) ? (
-                <label className="app-empty-search">
-                  <span aria-hidden="true">/</span>
+              <div
+                className={`app-empty-search-wrap${
+                  emptyOmnibar.isSearchExpanded ? ' is-open' : ''
+                }`}
+              >
+                <button
+                  type="button"
+                  className="app-empty-search-trigger"
+                  aria-label={
+                    emptyOmnibar.isSearchExpanded ? 'Focus search' : 'Open search'
+                  }
+                  aria-expanded={emptyOmnibar.isSearchExpanded}
+                  tabIndex={emptyOmnibar.triggerTabIndex}
+                  onClick={() => {
+                    setSearchOpen(true);
+                    window.requestAnimationFrame(() => searchRef.current?.focus());
+                  }}
+                >
+                  <span className="app-empty-search-symbol" aria-hidden="true">/</span>
+                  <span className="app-empty-search-trigger-label">
+                    Search web, !bangs, or URL
+                  </span>
+                </button>
+                <label
+                  className="app-empty-search"
+                  aria-hidden={!emptyOmnibar.isSearchExpanded}
+                >
                   <input
                     ref={searchRef}
-                    autoFocus={searchOpen}
-                    tabIndex={dropActive ? -1 : undefined}
+                    tabIndex={emptyOmnibar.inputTabIndex}
                     value={query}
                     onFocus={() => setSearchOpen(true)}
                     onBlur={(event) => {
@@ -1358,20 +1398,7 @@ function App() {
                     aria-label="Search web, !bangs, or URL"
                   />
                 </label>
-              ) : (
-                <button
-                  type="button"
-                  className="app-empty-search-trigger"
-                  tabIndex={dropActive ? -1 : undefined}
-                  onClick={() => {
-                    setSearchOpen(true);
-                    window.requestAnimationFrame(() => searchRef.current?.focus());
-                  }}
-                >
-                  <span aria-hidden="true">/</span>
-                  <span>Search web, !bangs, or URL</span>
-                </button>
-              )}
+              </div>
               <button
                 type="button"
                 className="app-empty-settings-button"
@@ -1385,33 +1412,48 @@ function App() {
               </button>
             </div>
 
-            {omnibarAction && (
-              <div className="app-empty-omnibar-result">
-                <a
-                  href={omnibarAction.url}
-                  draggable={false}
-                  onDragStart={(event) => event.preventDefault()}
-                  tabIndex={dropActive ? -1 : undefined}
-                  className="app-omnibar-action is-current is-keyboard-current"
-                >
-                  {omnibarAction.iconUrl ? (
-                    <img src={omnibarAction.iconUrl} alt="" draggable={false} />
-                  ) : (
-                    <span className="app-omnibar-glyph" aria-hidden="true">
-                      {getOmnibarGlyph(omnibarAction)}
-                    </span>
-                  )}
-                  <span className="app-bookmark-copy">
-                    <strong>{omnibarAction.title}</strong>
-                    <small>{omnibarAction.subtitle}</small>
-                  </span>
-                  <span className="app-bookmark-tail">
-                    <code className="app-omnibar-badge">{omnibarAction.badge}</code>
-                    <b aria-hidden="true">↗</b>
-                  </span>
-                </a>
+            <div
+              className={`app-empty-omnibar-drawer${
+                emptyOmnibar.isDrawerOpen ? ' is-open' : ''
+              }`}
+              aria-hidden={!emptyOmnibar.isDrawerOpen || dropActive}
+            >
+              <div className="app-empty-omnibar-drawer-inner">
+                <div className="app-empty-omnibar-result">
+                  <div className="app-empty-omnibar-result-card">
+                    <a
+                      href={emptyDisplayedAction.url}
+                      draggable={false}
+                      onDragStart={(event) => event.preventDefault()}
+                      tabIndex={emptyOmnibar.resultTabIndex}
+                      className="app-omnibar-action is-current is-keyboard-current"
+                    >
+                      {emptyDisplayedAction.iconUrl ? (
+                        <img
+                          src={emptyDisplayedAction.iconUrl}
+                          alt=""
+                          draggable={false}
+                        />
+                      ) : (
+                        <span className="app-omnibar-glyph" aria-hidden="true">
+                          {getOmnibarGlyph(emptyDisplayedAction)}
+                        </span>
+                      )}
+                      <span className="app-bookmark-copy">
+                        <strong>{emptyDisplayedAction.title}</strong>
+                        <small>{emptyDisplayedAction.subtitle}</small>
+                      </span>
+                      <span className="app-bookmark-tail">
+                        <code className="app-omnibar-badge">
+                          {emptyDisplayedAction.badge}
+                        </code>
+                        <b aria-hidden="true">↗</b>
+                      </span>
+                    </a>
+                  </div>
+                </div>
               </div>
-            )}
+            </div>
           </div>
 
           {error && (

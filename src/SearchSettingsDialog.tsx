@@ -60,6 +60,14 @@ export default function SearchSettingsDialog({
       homeUrl: bang.homeUrl,
     })),
   );
+  const [disabledBuiltInBangs, setDisabledBuiltInBangs] = useState<Set<string>>(
+    () =>
+      new Set(
+        (settings.disabledBuiltInBangs ?? [])
+          .map((trigger) => normalizeAlias(trigger))
+          .filter(Boolean),
+      ),
+  );
   const [error, setError] = useState('');
 
   const dialogRef = useRef<HTMLElement>(null);
@@ -105,6 +113,23 @@ export default function SearchSettingsDialog({
     window.requestAnimationFrame(() => {
       (addBangButtonRef.current ?? dialogRef.current)?.focus();
     });
+  };
+
+  const toggleBuiltInBang = (trigger: string) => {
+    setDisabledBuiltInBangs((current) => {
+      const next = new Set(current);
+      if (next.has(trigger)) next.delete(trigger);
+      else next.add(trigger);
+      return next;
+    });
+  };
+
+  const enableAllBuiltInBangs = () => {
+    setDisabledBuiltInBangs(new Set());
+  };
+
+  const disableAllBuiltInBangs = () => {
+    setDisabledBuiltInBangs(new Set(BUILT_IN_BANGS.map((bang) => bang.trigger)));
   };
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -193,6 +218,12 @@ export default function SearchSettingsDialog({
     }
 
     next.customBangs = validatedBangs;
+    const orderedDisabled = BUILT_IN_BANGS
+      .map((bang) => bang.trigger)
+      .filter((trigger) => disabledBuiltInBangs.has(trigger));
+    if (orderedDisabled.length > 0) {
+      next.disabledBuiltInBangs = orderedDisabled;
+    }
     const saveError = onSave(next);
     if (saveError) setError(saveError);
   };
@@ -201,6 +232,10 @@ export default function SearchSettingsDialog({
     customBangs
       .map((row) => normalizeAlias(row.trigger))
       .filter(Boolean),
+  );
+  const enabledBuiltInCount = BUILT_IN_BANGS.reduce(
+    (count, bang) => count + (disabledBuiltInBangs.has(bang.trigger) ? 0 : 1),
+    0,
   );
 
   return (
@@ -364,10 +399,36 @@ export default function SearchSettingsDialog({
               )}
             </div>
 
-            <details className="app-form-details">
-              <summary>Built-in !bangs ({BUILT_IN_BANGS.length})</summary>
+            <details className="app-form-details" open>
+              <summary>
+                Built-in !bangs ({enabledBuiltInCount}/{BUILT_IN_BANGS.length} enabled)
+              </summary>
+              <div className="app-builtin-bangs-header">
+                <p className="app-bang-section-hint">
+                  Toggle individual built-in shortcuts on or off. Active custom !bangs and bookmark shortcuts still take priority.
+                </p>
+                <div className="app-builtin-bangs-actions">
+                  <button
+                    type="button"
+                    className="app-bang-bulk-button"
+                    disabled={disabledBuiltInBangs.size === 0}
+                    onClick={enableAllBuiltInBangs}
+                  >
+                    Enable all
+                  </button>
+                  <button
+                    type="button"
+                    className="app-bang-bulk-button"
+                    disabled={disabledBuiltInBangs.size === BUILT_IN_BANGS.length}
+                    onClick={disableAllBuiltInBangs}
+                  >
+                    Disable all
+                  </button>
+                </div>
+              </div>
               <div className="app-builtin-bangs">
                 {BUILT_IN_BANGS.map((bang) => {
+                  const isEnabled = !disabledBuiltInBangs.has(bang.trigger);
                   const bookmarkSearchOverride = bookmarks.find(
                     (b) =>
                       normalizeAlias(b.alias ?? '') === bang.trigger
@@ -380,21 +441,44 @@ export default function SearchSettingsDialog({
                     : undefined;
                   const customOverride = activeCustomTriggers.has(bang.trigger);
 
-                  let overrideNote = '';
-                  if (bookmarkSearchOverride) {
-                    overrideNote = `Overridden by bookmark “${bookmarkSearchOverride.title}”`;
+                  let statusNote = '';
+                  if (!isEnabled) {
+                    if (bookmarkSearchOverride) {
+                      statusNote = `Built-in off · bookmark “${bookmarkSearchOverride.title}” active`;
+                    } else if (customOverride) {
+                      statusNote = 'Built-in off · custom !bang active';
+                    } else if (bookmarkJumpOverride) {
+                      statusNote = `Built-in off · bookmark “${bookmarkJumpOverride.title}” active`;
+                    } else {
+                      statusNote = 'Disabled';
+                    }
+                  } else if (bookmarkSearchOverride) {
+                    statusNote = `Overridden by bookmark “${bookmarkSearchOverride.title}”`;
                   } else if (customOverride) {
-                    overrideNote = 'Overridden by custom !bang';
+                    statusNote = 'Overridden by custom !bang';
                   } else if (bookmarkJumpOverride) {
-                    overrideNote = `Bookmark “${bookmarkJumpOverride.title}”`;
+                    statusNote = `Bookmark “${bookmarkJumpOverride.title}”`;
                   }
 
                   return (
-                    <div key={bang.trigger} className="app-builtin-bang-row">
-                      <code>!{bang.trigger}</code>
-                      <span>{bang.label}</span>
-                      {overrideNote && <small>{overrideNote}</small>}
-                    </div>
+                    <label
+                      key={bang.trigger}
+                      className={`app-builtin-bang-row${!isEnabled ? ' is-disabled' : ''}`}
+                    >
+                      <span className="app-builtin-bang-main">
+                        <input
+                          type="checkbox"
+                          role="switch"
+                          checked={isEnabled}
+                          aria-label={`Enable !${bang.trigger} (${bang.label})`}
+                          onChange={() => toggleBuiltInBang(bang.trigger)}
+                        />
+                        <span className="app-bang-toggle" aria-hidden="true" />
+                        <code>!{bang.trigger}</code>
+                        <span>{bang.label}</span>
+                      </span>
+                      {statusNote && <small>{statusNote}</small>}
+                    </label>
                   );
                 })}
               </div>

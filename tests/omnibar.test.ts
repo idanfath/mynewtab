@@ -2,15 +2,19 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Bookmark } from '../src/bookmarks.ts';
 import {
+  BUILT_IN_BANGS,
   DEFAULT_OMNIBAR_SETTINGS,
   OMNIBAR_BACKUP_KEY,
   OMNIBAR_STORAGE_KEY,
   buildWebSearchUrl,
   detectDirectUrl,
   getBookmarkOmnibarIcon,
+  getEnabledBuiltInBangs,
   getOmnibarGlyph,
+  isBuiltInBangEnabled,
   loadStoredOmnibarSettings,
   parseOmnibarSettings,
+  resolveEmptyOmnibarState,
   resolveOmnibar,
   resolvePreservedCustomBangHomeUrl,
   resolveTabCompletion,
@@ -662,4 +666,180 @@ test('loadInitialOmnibarState falls back safely when localStorage throws Securit
     settings: DEFAULT_OMNIBAR_SETTINGS,
     error: null,
   });
+});
+
+test('toggles individual built-in !bangs with storage persistence while honoring custom and bookmark overrides', () => {
+  // All built-ins enabled by default
+  assert.equal(getEnabledBuiltInBangs(DEFAULT_OMNIBAR_SETTINGS).length, BUILT_IN_BANGS.length);
+  for (const bang of BUILT_IN_BANGS) {
+    assert.equal(isBuiltInBangEnabled(DEFAULT_OMNIBAR_SETTINGS, bang.trigger), true);
+  }
+
+  // Persistence: normalizes, deduplicates, orders, and omits when empty
+  const parsedEmpty = parseOmnibarSettings(
+    JSON.stringify({ version: 1, defaultEngine: 'google', customBangs: [], disabledBuiltInBangs: [] }),
+  );
+  assert.equal(parsedEmpty.disabledBuiltInBangs, undefined);
+
+  const parsedDisabled = parseOmnibarSettings(
+    JSON.stringify({
+      version: 1,
+      defaultEngine: 'google',
+      customBangs: [],
+      disabledBuiltInBangs: ['!YT', 'gh', 'gh', 'mdn', 'unknown-future-bang'],
+    }),
+  );
+  assert.deepEqual(parsedDisabled.disabledBuiltInBangs, ['yt', 'gh', 'mdn']);
+  assert.equal(isBuiltInBangEnabled(parsedDisabled, 'gh'), false);
+  assert.equal(isBuiltInBangEnabled(parsedDisabled, '!YT'), false);
+  assert.equal(isBuiltInBangEnabled(parsedDisabled, 'w'), true);
+
+  const store = memoryStorage(
+    new Map([[OMNIBAR_STORAGE_KEY, JSON.stringify(parsedDisabled)]]),
+  );
+  assert.deepEqual(loadStoredOmnibarSettings(store).settings.disabledBuiltInBangs, [
+    'yt',
+    'gh',
+    'mdn',
+  ]);
+
+  // Validation errors on malformed disabledBuiltInBangs
+  assert.throws(
+    () => parseOmnibarSettings(JSON.stringify({ version: 1, defaultEngine: 'google', disabledBuiltInBangs: 'gh' })),
+    /disabledBuiltInBangs must be an array/,
+  );
+  assert.throws(
+    () => parseOmnibarSettings(JSON.stringify({ version: 1, defaultEngine: 'google', disabledBuiltInBangs: [123] })),
+    /must be a string/,
+  );
+  assert.throws(
+    () => parseOmnibarSettings(JSON.stringify({ version: 1, defaultEngine: 'google', disabledBuiltInBangs: ['!@'] })),
+    /must be a valid bang trigger/,
+  );
+
+  // Disabled built-in bang does NOT trigger on !bang, !bang<space>, !bang query, or prefix Tab completion
+  assert.equal(resolveOmnibar('!gh', [], parsedDisabled, [])?.kind, 'bang-unknown');
+  assert.equal(
+    resolveOmnibar('!gh', [], parsedDisabled, [])?.url,
+    'https://www.google.com/search?q=!gh',
+  );
+  assert.equal(resolveOmnibar('!gh ', [], parsedDisabled, [])?.kind, 'bang-unknown');
+  assert.equal(resolveOmnibar('!gh react', [], parsedDisabled, [])?.kind, 'bang-unknown');
+  assert.equal(
+    resolveOmnibar('!gh react', [], parsedDisabled, [])?.url,
+    'https://www.google.com/search?q=!gh%20react',
+  );
+  assert.equal(resolveOmnibar('!md', [], parsedDisabled, [])?.tabCompletion, undefined);
+  // Enabled built-ins still work
+  assert.equal(
+    resolveOmnibar('!w', [], parsedDisabled, [])?.url,
+    'https://en.wikipedia.org/',
+  );
+
+  // Overriding a disabled built-in bang with an active custom !bang still triggers custom !bang
+  const withCustomOverride: OmnibarSettings = {
+    ...parsedDisabled,
+    customBangs: [
+      {
+        trigger: 'gh',
+        label: 'GitHub Enterprise',
+        homeUrl: 'https://ghe.example.com/',
+        searchUrl: 'https://ghe.example.com/search?q=%s',
+      },
+    ],
+  };
+  assert.equal(
+    resolveOmnibar('!gh', [], withCustomOverride, [])?.url,
+    'https://ghe.example.com/',
+  );
+  assert.equal(
+    resolveOmnibar('!gh ', [], withCustomOverride, [])?.url,
+    'https://ghe.example.com/',
+  );
+  assert.equal(
+    resolveOmnibar('!gh auth', [], withCustomOverride, [])?.url,
+    'https://ghe.example.com/search?q=auth',
+  );
+
+  // Overriding a disabled built-in bang with a bookmark alias (with or without searchUrl) still works
+  assert.equal(
+    resolveOmnibar('!gh', [githubBookmark], parsedDisabled, [])?.url,
+    'https://github.com/',
+  );
+  assert.equal(
+    resolveOmnibar('!gh hooks', [githubBookmark], parsedDisabled, [])?.url,
+    'https://github.com/search?q=hooks',
+  );
+
+  // Bookmark without searchUrl when matching built-in (!hn) is disabled uses site: fallback instead of disabled built-in template
+  const hnDisabled: OmnibarSettings = {
+    version: 1,
+    defaultEngine: 'duckduckgo',
+    customBangs: [],
+    disabledBuiltInBangs: ['hn'],
+  };
+  const hnBookmarkOnly = resolveOmnibar('!hn zig', [hnBookmark], hnDisabled, []);
+  assert.equal(hnBookmarkOnly?.kind, 'bang-search');
+  assert.equal(
+    hnBookmarkOnly?.url,
+    'https://duckduckgo.com/?q=site%3Anews.ycombinator.com%20zig',
+  );
+
+  // Disabling all built-in bangs with zero bookmarks/custom bangs never suggests a disabled trigger on bare "!"
+  const allDisabled: OmnibarSettings = {
+    version: 1,
+    defaultEngine: 'duckduckgo',
+    customBangs: [],
+    disabledBuiltInBangs: BUILT_IN_BANGS.map((b) => b.trigger),
+  };
+  const bareBangAllOff = resolveOmnibar('!', [], allDisabled, []);
+  assert.equal(bareBangAllOff?.kind, 'bang-incomplete');
+  assert.equal(bareBangAllOff?.tabCompletion, undefined);
+});
+
+test('resolveEmptyOmnibarState coordinates search expansion, drawer state, exit card retention, and drop focus locks', () => {
+  const googleSettings: OmnibarSettings = {
+    version: 1,
+    defaultEngine: 'google',
+    customBangs: [],
+  };
+
+  // Resting empty state: collapsed search, closed drawer, only trigger tabbable
+  const resting = resolveEmptyOmnibarState('', false, false, null, null, googleSettings);
+  assert.equal(resting.isSearchExpanded, false);
+  assert.equal(resting.isDrawerOpen, false);
+  assert.equal(resting.triggerTabIndex, undefined);
+  assert.equal(resting.inputTabIndex, -1);
+  assert.equal(resting.resultTabIndex, -1);
+  assert.equal(resting.displayedAction.badge, 'GOOGLE');
+
+  // "/" pressed (searchOpen = true, query = ''): search expands smoothly, drawer stays closed
+  const openedEmpty = resolveEmptyOmnibarState('', true, false, null, null, googleSettings);
+  assert.equal(openedEmpty.isSearchExpanded, true);
+  assert.equal(openedEmpty.isDrawerOpen, false);
+  assert.equal(openedEmpty.triggerTabIndex, -1);
+  assert.equal(openedEmpty.inputTabIndex, undefined);
+  assert.equal(openedEmpty.resultTabIndex, -1);
+
+  // Typing "as": drawer opens with live Google action card, input + result tabbable
+  const liveAction = resolveOmnibar('as', [], googleSettings, []);
+  assert.ok(liveAction !== null);
+  const typing = resolveEmptyOmnibarState('as', true, false, liveAction, null, googleSettings);
+  assert.equal(typing.isSearchExpanded, true);
+  assert.equal(typing.isDrawerOpen, true);
+  assert.equal(typing.displayedAction, liveAction);
+  assert.equal(typing.resultTabIndex, undefined);
+
+  // Clearing query back to "" while still focused: drawer closes smoothly while retaining lastOmnibarAction for exit animation
+  const clearedFocused = resolveEmptyOmnibarState('', true, false, null, liveAction, googleSettings);
+  assert.equal(clearedFocused.isSearchExpanded, true);
+  assert.equal(clearedFocused.isDrawerOpen, false);
+  assert.equal(clearedFocused.displayedAction, liveAction);
+  assert.equal(clearedFocused.resultTabIndex, -1);
+
+  // Drag-and-drop active: locks all tab indices to -1
+  const dropping = resolveEmptyOmnibarState('as', true, true, liveAction, liveAction, googleSettings);
+  assert.equal(dropping.triggerTabIndex, -1);
+  assert.equal(dropping.inputTabIndex, -1);
+  assert.equal(dropping.resultTabIndex, -1);
 });

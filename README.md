@@ -12,7 +12,7 @@ Personal new-tab page built with React, TypeScript, Vite, Tailwind CSS, and Mona
 - Local persistence through `localStorage`.
 - Fuzzy search across titles, sections, categories, capabilities, and notes.
 - Unified omnibar (`/`) supporting `!bang` shortcuts, bookmark site search, direct URL/localhost navigation, and web search (`Tab` to autocomplete `!bang`, `Shift+Enter` to search web directly).
-- Configurable default search engine presets and custom `!bang` triggers persisted locally in `localStorage`.
+- Configurable default search engine presets, per-built-in `!bang` toggles, and custom `!bang` triggers persisted locally in `localStorage`.
 - Drag-and-drop section ordering.
 - Bundled background and app icon assets with production caching on Vercel.
 
