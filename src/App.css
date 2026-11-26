@@ -2466,6 +2466,54 @@ html.app-route-root::-webkit-scrollbar {
     color: var(--quiet);
 }
 
+.app-snapshot-title-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.65rem;
+}
+
+.app-snapshot-live-hash {
+    padding: 0.14rem 0.44rem;
+    border: 1px solid color-mix(in oklch, var(--accent) 46%, var(--line));
+    border-radius: 0.24rem;
+    color: var(--accent);
+    background: oklch(0.13 0.01 75 / 0.72);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.58rem;
+    letter-spacing: 0.04em;
+}
+
+.app-snapshot-item-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.42rem;
+    min-width: 0;
+}
+
+.app-snapshot-item-meta span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.app-snapshot-hash {
+    flex: 0 0 auto;
+    padding: 0.06rem 0.32rem;
+    border: 1px solid var(--line);
+    border-radius: 0.2rem;
+    color: var(--muted);
+    background: oklch(0.13 0.008 75 / 0.78);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.56rem;
+    letter-spacing: 0.03em;
+}
+
+.app-snapshot-item.is-selected .app-snapshot-hash {
+    border-color: color-mix(in oklch, var(--accent) 48%, var(--line));
+    color: var(--accent);
+}
+
 .app-snapshot-create {
     display: flex;
     align-items: center;
@@ -2620,7 +2668,11 @@ html.app-route-root::-webkit-scrollbar {
 }
 
 .app-snapshot-detail-meta {
-    margin: 0.3rem 0 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0.35rem 0 0;
     color: var(--quiet);
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
     font-size: 0.62rem;

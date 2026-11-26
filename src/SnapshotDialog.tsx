@@ -3,6 +3,8 @@ import { BACKUP_KEY, STORAGE_KEY, type Bookmark } from './bookmarks.ts';
 import { serializeBookmarksHtml } from './bookmarkHtml.ts';
 import {
   diffSnapshotAgainstLive,
+  formatLiveHashBadge,
+  formatShortHashChip,
   type BookmarkSnapshot,
   type CorruptBackupInfo,
   type SnapshotTrigger,
@@ -93,6 +95,11 @@ export default function SnapshotDialog({
     [selectedSnapshot, liveBookmarks],
   );
 
+  const liveHashBadge = useMemo(
+    () => formatLiveHashBadge(liveBookmarks),
+    [liveBookmarks],
+  );
+
   const selectedSections = useMemo(() => {
     if (!selectedSnapshot) return [];
     const counts = new Map<string, number>();
@@ -167,7 +174,14 @@ export default function SnapshotDialog({
           <header>
             <div>
               <p className="app-kicker">Local recovery</p>
-              <h2 id="app-snapshot-dialog-title">Snapshot history</h2>
+              <div className="app-snapshot-title-row">
+                <h2 id="app-snapshot-dialog-title">Snapshot history</h2>
+                {liveHashBadge && (
+                  <code className="app-snapshot-live-hash" title="Active directory content hash">
+                    {liveHashBadge}
+                  </code>
+                )}
+              </div>
             </div>
             <button type="button" className="app-form-close" onClick={onClose}>
               Close
@@ -288,8 +302,13 @@ export default function SnapshotDialog({
                             {TRIGGER_LABELS[snapshot.trigger]}
                           </span>
                         </div>
-                        <small>
-                          {formatTimestamp(snapshot.createdAt)} · {snapshot.bookmarkCount} item{snapshot.bookmarkCount === 1 ? '' : 's'}
+                        <small className="app-snapshot-item-meta">
+                          <code className="app-snapshot-hash">
+                            {formatShortHashChip(snapshot.hash)}
+                          </code>
+                          <span>
+                            {formatTimestamp(snapshot.createdAt)} · {snapshot.bookmarkCount} item{snapshot.bookmarkCount === 1 ? '' : 's'}
+                          </span>
                         </small>
                       </button>
                     );
@@ -302,9 +321,14 @@ export default function SnapshotDialog({
                       <div>
                         <h3>{selectedSnapshot.label}</h3>
                         <p className="app-snapshot-detail-meta">
-                          {formatTimestamp(selectedSnapshot.createdAt)} ·{' '}
-                          {selectedSnapshot.bookmarkCount} bookmark{selectedSnapshot.bookmarkCount === 1 ? '' : 's'} ·{' '}
-                          {selectedSnapshot.sectionCount} section{selectedSnapshot.sectionCount === 1 ? '' : 's'}
+                          <code className="app-snapshot-hash">
+                            {formatShortHashChip(selectedSnapshot.hash)}
+                          </code>
+                          <span>
+                            {formatTimestamp(selectedSnapshot.createdAt)} ·{' '}
+                            {selectedSnapshot.bookmarkCount} bookmark{selectedSnapshot.bookmarkCount === 1 ? '' : 's'} ·{' '}
+                            {selectedSnapshot.sectionCount} section{selectedSnapshot.sectionCount === 1 ? '' : 's'}
+                          </span>
                         </p>
                       </div>
                       <span className={`app-snapshot-trigger is-${selectedSnapshot.trigger}`}>

@@ -62,7 +62,9 @@ import {
   SNAPSHOTS_KEY,
   cloneBookmark,
   computeBookmarksHash,
+  formatPreRestoreLabel,
   safeGetItem,
+  shortBookmarksHash,
   type BookmarkSnapshot,
   type SnapshotRequest,
 } from './snapshotVault.ts';
@@ -1750,7 +1752,7 @@ function App() {
   const handleRestoreSnapshot = (snapshot: BookmarkSnapshot): string | null => {
     const nextBookmarks = snapshot.bookmarks.map(cloneBookmark);
     const snapshotRequests: SnapshotRequest[] = bookmarks.length > 0
-      ? [{ trigger: 'pre-restore', label: `Before restoring “${snapshot.label}”` }]
+      ? [{ trigger: 'pre-restore', label: formatPreRestoreLabel(snapshot) }]
       : [];
 
     const result = persistWithMeta(nextBookmarks, null, {
@@ -1768,7 +1770,7 @@ function App() {
     closeSnapshotDialog();
     setStatusToast({
       title: 'Snapshot restored',
-      detail: snapshot.label,
+      detail: `#${shortBookmarksHash(snapshot.hash)} · ${snapshot.label}`,
     });
     return null;
   };
@@ -1780,9 +1782,12 @@ function App() {
         ? 'Add bookmarks before saving a checkpoint.'
         : 'Browser storage is full, blocked, or unavailable.';
     }
+    const saved = result.snapshot;
     setStatusToast({
       title: result.status === 'upgraded' ? 'Checkpoint updated' : 'Checkpoint saved',
-      detail: label.trim() || 'Manual checkpoint',
+      detail: saved
+        ? `#${shortBookmarksHash(saved.hash)} · ${saved.label}`
+        : label.trim() || 'Manual checkpoint',
     });
     return null;
   };

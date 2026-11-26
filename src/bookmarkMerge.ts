@@ -205,6 +205,13 @@ export function computeBookmarksHash(bookmarks: readonly Bookmark[]): string {
   return `${canonical.length.toString(36)}:${h2Hex}${h1Hex}`;
 }
 
+export function shortBookmarksHash(hash: string): string {
+  const trimmed = hash.trim();
+  const colonIndex = trimmed.indexOf(':');
+  const hex = colonIndex >= 0 ? trimmed.slice(colonIndex + 1) : trimmed;
+  return hex.slice(0, 6).toLowerCase();
+}
+
 export function areBookmarksEqual(a: Bookmark, b: Bookmark): boolean {
   return JSON.stringify(canonicalizeBookmark(a)) === JSON.stringify(canonicalizeBookmark(b));
 }

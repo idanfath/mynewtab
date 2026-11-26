@@ -165,6 +165,7 @@ export function useBookmarks() {
   ): {
     ok: boolean;
     status: 'added' | 'upgraded' | 'skipped-empty' | 'quota-exceeded';
+    snapshot?: BookmarkSnapshot;
   } => {
     const storage = getBrowserStorage();
     if (!storage) {
@@ -172,7 +173,11 @@ export function useBookmarks() {
     }
     const result = saveManualSnapshot(storage, bookmarks, label);
     setSnapshots(result.snapshots);
-    return { ok: result.ok, status: result.status };
+    return {
+      ok: result.ok,
+      status: result.status,
+      snapshot: result.ok ? result.snapshots[0] : undefined,
+    };
   };
 
   const deleteSnapshot = (snapshotId: string): boolean => {

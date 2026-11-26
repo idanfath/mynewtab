@@ -7,9 +7,26 @@ import {
   type StoredDataFailure,
 } from './bookmarks.ts';
 import { normalizeUrl, urlIdentity } from './lib.ts';
-import { areBookmarksEqual, computeBookmarksHash } from './bookmarkMerge.ts';
+import {
+  areBookmarksEqual,
+  computeBookmarksHash,
+  shortBookmarksHash,
+} from './bookmarkMerge.ts';
 
-export { computeBookmarksHash };
+export { computeBookmarksHash, shortBookmarksHash };
+
+export function formatShortHashChip(hash: string): string {
+  return `#${shortBookmarksHash(hash)}`;
+}
+
+export function formatLiveHashBadge(bookmarks: readonly Bookmark[]): string | null {
+  if (bookmarks.length === 0) return null;
+  return `Current · #${shortBookmarksHash(computeBookmarksHash(bookmarks))}`;
+}
+
+export function formatPreRestoreLabel(snapshot: Pick<BookmarkSnapshot, 'hash'>): string {
+  return `Before restoring #${shortBookmarksHash(snapshot.hash)}`;
+}
 
 export const SNAPSHOTS_KEY = 'newtab-directory-snapshots-v1';
 export const MAX_SNAPSHOTS = 15;
@@ -353,21 +370,35 @@ export function buildNextSnapshots(
   }
 
   const hash = computeBookmarksHash(request.bookmarks);
-  const cleanLabel = request.label.trim()
+  const trimmedLabel = request.label.trim();
+  const cleanLabel = trimmedLabel
     || (request.trigger === 'manual' ? 'Manual checkpoint' : 'Saved snapshot');
 
-  if (currentSnapshots[0]?.hash === hash) {
+  const matchingSnapshots = currentSnapshots.filter((snapshot) => snapshot.hash === hash);
+  if (matchingSnapshots.length > 0) {
+    const preferredMatch = matchingSnapshots.find((snapshot) => snapshot.trigger === 'manual')
+      ?? matchingSnapshots[0];
+    const remaining = currentSnapshots.filter((snapshot) => snapshot.hash !== hash);
+
     if (request.trigger !== 'manual') {
-      return { snapshots: [...currentSnapshots], status: 'deduplicated' };
+      const bubbled: BookmarkSnapshot = {
+        ...preferredMatch,
+        createdAt: nowIso,
+      };
+      return {
+        snapshots: [bubbled, ...remaining],
+        status: 'deduplicated',
+      };
     }
+
     const upgraded: BookmarkSnapshot = {
-      ...currentSnapshots[0],
+      ...preferredMatch,
       trigger: 'manual',
-      label: request.label.trim() || currentSnapshots[0].label.trim() || 'Manual checkpoint',
+      label: trimmedLabel || preferredMatch.label.trim() || 'Manual checkpoint',
       createdAt: nowIso,
     };
     return {
-      snapshots: [upgraded, ...currentSnapshots.slice(1)],
+      snapshots: [upgraded, ...remaining],
       status: 'upgraded',
     };
   }
@@ -568,7 +599,11 @@ export function persistBookmarksWithVault(
       label: req.label,
       bookmarks: targetBookmarks,
     });
-    if (built.status === 'added' || built.status === 'upgraded') {
+    if (
+      built.status === 'added'
+      || built.status === 'upgraded'
+      || built.status === 'deduplicated'
+    ) {
       candidate = built.snapshots;
       mutatedVault = true;
     }
@@ -627,7 +662,7 @@ export function saveManualSnapshot(
   const existing = loadSnapshots(storage);
   const built = buildNextSnapshots(existing, {
     trigger: 'manual',
-    label: label.trim() || 'Manual checkpoint',
+    label,
     bookmarks,
   });
 

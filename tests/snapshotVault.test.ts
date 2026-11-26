@@ -9,10 +9,14 @@ import {
   computeBookmarksHash,
   deleteSnapshotFromVault,
   diffSnapshotAgainstLive,
+  formatLiveHashBadge,
+  formatPreRestoreLabel,
+  formatShortHashChip,
   loadSnapshots,
   persistBookmarksWithVault,
   readCorruptBackup,
   saveManualSnapshot,
+  shortBookmarksHash,
 } from '../src/snapshotVault.ts';
 
 function createCappedStorage(maxBytes = Number.POSITIVE_INFINITY) {
@@ -546,4 +550,166 @@ test('diffSnapshotAgainstLive accounts for duplicate URLs instead of reporting o
   assert.equal(snapHasDup.restoredOrAddedCount, 1);
   assert.equal(snapHasDup.orderChanged, false);
   assert.equal(snapHasDup.isIdenticalToLive, false);
+});
+
+test('shortBookmarksHash, chip/live badges, and formatPreRestoreLabel slice 6 hex chars after colon', () => {
+  const listA = [makeBookmark(1, 'Work')];
+  const listB = [makeBookmark(2, 'Media')];
+  const fullHashA = computeBookmarksHash(listA);
+  const shortA = shortBookmarksHash(fullHashA);
+
+  assert.equal(fullHashA.includes(':'), true);
+  assert.match(shortA, /^[0-9a-f]{6}$/);
+  assert.equal(shortA, fullHashA.split(':')[1]!.slice(0, 6));
+  assert.notEqual(shortA, shortBookmarksHash(computeBookmarksHash(listB)));
+
+  // Fallback without colon prefix
+  assert.equal(shortBookmarksHash('  ABCDEF123456  '), 'abcdef');
+
+  assert.equal(formatShortHashChip(fullHashA), `#${shortA}`);
+  assert.equal(formatLiveHashBadge([]), null);
+  assert.equal(formatLiveHashBadge(listA), `Current · #${shortA}`);
+  assert.equal(formatPreRestoreLabel({ hash: fullHashA }), `Before restoring #${shortA}`);
+});
+
+test('vault-wide deduplication prevents ping-pong restore bloat and nested pre-restore labels', () => {
+  const storage = createCappedStorage();
+  const stateA = [makeBookmark(1, 'Work')];
+  const stateB = [makeBookmark(2, 'Reading'), makeBookmark(3, 'Reading')];
+  const stateC = [makeBookmark(4, 'Tools')];
+
+  const hashA = computeBookmarksHash(stateA);
+  const hashB = computeBookmarksHash(stateB);
+  const shortA = shortBookmarksHash(hashA);
+
+  // 1. User replaces initial stateA with stateB -> Snapshot 1 captures stateA
+  let live = stateB;
+  let res = persistBookmarksWithVault(storage, live, {
+    snapshots: [{
+      trigger: 'pre-replace',
+      label: 'Before replacing with bookmarks (1).json',
+      bookmarks: stateA,
+    }],
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.snapshots.length, 1);
+  assert.equal(res.snapshots[0].hash, hashA);
+
+  // 2. First restore: restore stateA -> live stateB is new to vault, saved with flat #xxxxxx label
+  const snapA = res.snapshots[0];
+  res = persistBookmarksWithVault(storage, snapA.bookmarks, {
+    snapshots: [{
+      trigger: 'pre-restore',
+      label: formatPreRestoreLabel(snapA),
+      bookmarks: live,
+    }],
+  });
+  live = snapA.bookmarks;
+  assert.equal(res.snapshots.length, 2);
+  assert.equal(res.snapshots[0].hash, hashB);
+  assert.equal(res.snapshots[0].label, `Before restoring #${shortA}`);
+  assert.equal(res.snapshots[0].trigger, 'pre-restore');
+  assert.equal(res.snapshots[1].hash, hashA);
+  assert.equal(res.snapshots[1].label, 'Before replacing with bookmarks (1).json');
+
+  // 3. Ping-pong restore back and forth 6 times -> zero new snapshots, zero nested labels
+  for (let step = 0; step < 6; step += 1) {
+    const targetHash = step % 2 === 0 ? hashB : hashA;
+    const targetSnap = res.snapshots.find((s) => s.hash === targetHash)!;
+    res = persistBookmarksWithVault(storage, targetSnap.bookmarks, {
+      snapshots: [{
+        trigger: 'pre-restore',
+        label: formatPreRestoreLabel(targetSnap),
+        bookmarks: live,
+      }],
+    });
+    live = targetSnap.bookmarks;
+
+    assert.equal(res.snapshots.length, 2);
+    const uniqueHashes = new Set(res.snapshots.map((s) => s.hash));
+    assert.equal(uniqueHashes.size, 2);
+
+    const entryA = res.snapshots.find((s) => s.hash === hashA)!;
+    const entryB = res.snapshots.find((s) => s.hash === hashB)!;
+    assert.equal(entryA.label, 'Before replacing with bookmarks (1).json');
+    assert.equal(entryA.trigger, 'pre-replace');
+    assert.equal(entryB.label, `Before restoring #${shortA}`);
+    assert.equal(entryB.trigger, 'pre-restore');
+  }
+
+  // Persisted storage agrees with in-memory ring
+  const persisted = loadSnapshots(storage);
+  assert.equal(persisted.length, 2);
+  assert.equal(persisted.some((s) => s.label.includes('Before restoring “')), false);
+
+  // 4. Editing live to brand-new stateC then restoring snapA records flat #xxxxxx label for stateC
+  live = stateC;
+  const targetA = res.snapshots.find((s) => s.hash === hashA)!;
+  res = persistBookmarksWithVault(storage, targetA.bookmarks, {
+    snapshots: [{
+      trigger: 'pre-restore',
+      label: formatPreRestoreLabel(targetA),
+      bookmarks: live,
+    }],
+  });
+  assert.equal(res.snapshots.length, 3);
+  assert.equal(res.snapshots[0].hash, computeBookmarksHash(stateC));
+  assert.equal(res.snapshots[0].label, `Before restoring #${shortA}`);
+});
+
+test('full-ring deduplication preserves manual trigger/label on auto-match and upgrades older auto on manual save', () => {
+  const storage = createCappedStorage();
+  const pinnedBookmarks = [makeBookmark(10, 'Work')];
+  const autoBookmarks = [makeBookmark(20, 'Media')];
+
+  // Seed manual checkpoint, then push 3 newer auto snapshots so manual sits at index 3
+  const manualInit = saveManualSnapshot(storage, pinnedBookmarks, 'Pinned milestone');
+  assert.equal(manualInit.ok, true);
+
+  let ring = manualInit.snapshots;
+  ring = persistBookmarksWithVault(storage, [makeBookmark(99)], {
+    snapshots: [
+      { trigger: 'pre-replace', label: 'Before replacing with export.html', bookmarks: autoBookmarks },
+      { trigger: 'pre-import', label: 'Auto 2', bookmarks: [makeBookmark(21)] },
+      { trigger: 'pre-editor-save', label: 'Auto 3', bookmarks: [makeBookmark(22)] },
+    ],
+  }).snapshots;
+  assert.equal(ring.length, 4);
+  assert.equal(ring[3].label, 'Pinned milestone');
+  assert.equal(ring[3].trigger, 'manual');
+
+  // Auto pre-restore matching 'Pinned milestone' at index 3 bubbles it to index 0 WITHOUT downgrading trigger or label
+  const afterAutoMatch = persistBookmarksWithVault(storage, [makeBookmark(100)], {
+    snapshots: [{
+      trigger: 'pre-restore',
+      label: 'Before restoring #ffffff',
+      bookmarks: pinnedBookmarks,
+    }],
+  });
+  assert.equal(afterAutoMatch.ok, true);
+  assert.equal(afterAutoMatch.snapshots.length, 4);
+  assert.equal(afterAutoMatch.snapshots[0].label, 'Pinned milestone');
+  assert.equal(afterAutoMatch.snapshots[0].trigger, 'manual');
+  assert.equal(afterAutoMatch.snapshots[0].id, manualInit.snapshots[0].id);
+
+  // Manual checkpoint with blank label matching older auto-snapshot ('Before replacing with export.html')
+  // bubbles and upgrades it to 'manual' while keeping its descriptive label
+  const upgradedBlank = saveManualSnapshot(storage, autoBookmarks, '   ');
+  assert.equal(upgradedBlank.ok, true);
+  assert.equal(upgradedBlank.status, 'upgraded');
+  assert.equal(upgradedBlank.snapshots.length, 4);
+  assert.equal(upgradedBlank.snapshots[0].trigger, 'manual');
+  assert.equal(upgradedBlank.snapshots[0].label, 'Before replacing with export.html');
+
+  // Manual checkpoint with explicit new label renames the matching entry in place at index 0
+  const upgradedNamed = saveManualSnapshot(storage, autoBookmarks, 'Curated v2');
+  assert.equal(upgradedNamed.ok, true);
+  assert.equal(upgradedNamed.status, 'upgraded');
+  assert.equal(upgradedNamed.snapshots.length, 4);
+  assert.equal(upgradedNamed.snapshots[0].trigger, 'manual');
+  assert.equal(upgradedNamed.snapshots[0].label, 'Curated v2');
+
+  const reloaded = loadSnapshots(storage);
+  assert.equal(reloaded.length, 4);
+  assert.equal(new Set(reloaded.map((s) => s.hash)).size, 4);
 });
