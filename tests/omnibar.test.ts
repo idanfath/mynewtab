@@ -10,7 +10,6 @@ import {
   detectDirectUrl,
   getBookmarkOmnibarIcon,
   getEnabledBuiltInBangs,
-  getOmnibarGlyph,
   isBuiltInBangEnabled,
   loadStoredOmnibarSettings,
   parseOmnibarSettings,
@@ -19,7 +18,6 @@ import {
   resolvePreservedCustomBangHomeUrl,
   resolveTabCompletion,
   type OmnibarAction,
-  type OmnibarActionKind,
   type OmnibarSettings,
 } from '../src/omnibar.ts';
 import {
@@ -475,7 +473,7 @@ test('resolveOmnibar handles Levels 2, 3, 4, and 5 plus buildWebSearchUrl', () =
   );
 });
 
-test('resolveTabCompletion and getOmnibarGlyph behave deterministically', () => {
+test('resolveTabCompletion behaves deterministically', () => {
   const dummyAction: OmnibarAction = {
     kind: 'web-search',
     url: 'https://duckduckgo.com/?q=gh',
@@ -500,20 +498,6 @@ test('resolveTabCompletion and getOmnibarGlyph behave deterministically', () => 
     null,
   );
   assert.equal(resolveTabCompletion('!gh ', { kind: 'omnibar', action: dummyAction }, dummyAction), null);
-
-  const kinds: OmnibarActionKind[] = [
-    'bang-search',
-    'bang-jump',
-    'bang-incomplete',
-    'bang-unknown',
-    'url',
-    'bookmark-alias',
-    'web-search',
-  ];
-  for (const kind of kinds) {
-    const glyph = getOmnibarGlyph({ ...dummyAction, kind });
-    assert.equal([...glyph].length, 1, `glyph for ${kind} must be 1 character`);
-  }
 });
 
 test('parseOmnibarSettings, resolvePreservedCustomBangHomeUrl, recovery, and mergeStartupErrors', () => {

@@ -580,19 +580,6 @@ export function getBookmarkOmnibarIcon(bookmark: Bookmark): string | undefined {
   return favicon || undefined;
 }
 
-export function getOmnibarGlyph(action: OmnibarAction): string {
-  if (
-    action.kind === 'bang-search'
-    || action.kind === 'bang-jump'
-    || action.kind === 'bang-incomplete'
-    || action.kind === 'bookmark-alias'
-  ) {
-    return '!';
-  }
-  if (action.kind === 'url') return '↗';
-  return action.badge.charAt(0).toUpperCase() || '?';
-}
-
 export function detectDirectUrl(rawInput: string): string {
   const trimmed = rawInput.trim();
   if (!trimmed || trimmed.startsWith('!') || /\s/.test(trimmed) || /^[/\\?#]/.test(trimmed)) {

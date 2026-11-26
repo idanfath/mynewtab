@@ -597,26 +597,41 @@ html.app-route-root::-webkit-scrollbar {
 }
 
 .app-omnibar-bar {
-    margin-bottom: 2rem;
-    border-bottom: 1px solid var(--directory-line);
+    margin-bottom: 2.25rem;
 }
 
 .app-omnibar-action {
     position: relative;
     display: grid;
-    grid-template-columns: 2.4rem minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    gap: 0.8rem;
-    min-height: 4rem;
-    padding: 0.55rem 0.65rem;
-    border-top: 1px solid var(--directory-line);
+    gap: 1.25rem;
+    padding: 0.78rem 0.75rem 0.84rem 1.05rem;
+    border-bottom: 1px solid var(--directory-line);
     color: var(--ink);
+    background: transparent;
     text-decoration: none;
-    transform-origin: center;
     transition:
-        color 150ms var(--ease-state),
-        background-color 150ms var(--ease-state),
-        box-shadow 180ms var(--ease-state);
+        color 160ms var(--ease-state),
+        background 200ms var(--ease-state),
+        border-color 200ms var(--ease-state);
+}
+
+.app-omnibar-action::before {
+    position: absolute;
+    left: 0;
+    top: 0.55rem;
+    bottom: 0.55rem;
+    width: 2px;
+    border-radius: 999px;
+    background: var(--line-strong);
+    opacity: 0.55;
+    content: "";
+    transition:
+        top 220ms var(--ease-enter),
+        bottom 220ms var(--ease-enter),
+        background-color 180ms var(--ease-state),
+        opacity 180ms var(--ease-state);
 }
 
 .app-omnibar-action:hover,
@@ -627,89 +642,140 @@ html.app-route-root::-webkit-scrollbar {
 
 .app-omnibar-action:hover,
 .app-omnibar-action:focus-visible {
-    background: oklch(0.2 0.01 75 / 0.45);
+    background: linear-gradient(
+        90deg,
+        oklch(0.2 0.012 75 / 0.42) 0%,
+        oklch(0.16 0.008 75 / 0.14) 75%,
+        transparent 100%
+    );
 }
 
 .app-omnibar-action.is-current {
-    background: oklch(0.22 0.012 75 / 0.62);
-    -webkit-backdrop-filter: blur(14px) saturate(112%);
-    backdrop-filter: blur(14px) saturate(112%);
-    box-shadow:
-        inset 0 0 0 1px oklch(0.52 0.035 76 / 0.34),
-        0 10px 26px oklch(0.06 0.008 75 / 0.18);
+    border-bottom-color: color-mix(in oklch, var(--accent) 34%, var(--directory-line));
+    background: linear-gradient(
+        90deg,
+        oklch(0.215 0.016 76 / 0.54) 0%,
+        oklch(0.165 0.01 75 / 0.22) 70%,
+        transparent 100%
+    );
+    -webkit-backdrop-filter: blur(10px) saturate(110%);
+    backdrop-filter: blur(10px) saturate(110%);
 }
 
-.app-omnibar-action:hover {
-    box-shadow: none;
+.app-omnibar-action:hover::before,
+.app-omnibar-action:focus-visible::before,
+.app-omnibar-action.is-current::before {
+    top: 0.3rem;
+    bottom: 0.3rem;
+    background: var(--accent);
+    opacity: 1;
 }
 
-.app-omnibar-action.is-keyboard-current {
+.app-omnibar-action.is-keyboard-current,
+.app-omnibar-action.is-keyboard-current::before,
+.app-omnibar-action.is-keyboard-current .app-omnibar-arrow {
     transition-duration: 0ms;
 }
 
-.app-omnibar-action.is-keyboard-current img,
-.app-omnibar-action.is-keyboard-current .app-bookmark-tail b {
-    transition-duration: 0ms;
+.app-omnibar-copy {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 0.24rem;
 }
 
-.app-omnibar-action img {
-    width: 2rem;
-    height: 2rem;
-    border-radius: 0.35rem;
-    object-fit: contain;
-    background: oklch(0.93 0.008 75);
-    box-shadow: 0 4px 12px oklch(0.08 0.01 75 / 0.2);
-    transition: box-shadow 180ms var(--ease-state);
+.app-omnibar-title,
+.app-omnibar-meta {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
-.app-omnibar-action:hover img,
-.app-omnibar-action.is-current img {
-    box-shadow: 0 7px 18px oklch(0.08 0.01 75 / 0.28);
+.app-omnibar-title {
+    color: var(--ink);
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 1.05rem;
+    font-weight: 400;
+    letter-spacing: -0.02em;
+    line-height: 1.26;
 }
 
-.app-omnibar-action.is-current .app-bookmark-tail b {
+.app-omnibar-meta {
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.02em;
+}
+
+.app-omnibar-action.is-current .app-omnibar-meta {
+    color: var(--muted);
+}
+
+.app-omnibar-tail {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 0.7rem;
+}
+
+.app-omnibar-tag {
+    max-width: 8.5rem;
+    overflow: hidden;
     color: var(--accent);
-    opacity: 0.9;
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
-.app-omnibar-glyph,
+.app-omnibar-kbd {
+    padding: 0 0 0.12rem;
+    border-bottom: 1px solid var(--line-strong);
+    color: var(--quiet);
+    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    font-size: 0.56rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.app-omnibar-action.is-current .app-omnibar-kbd {
+    border-bottom-color: color-mix(in oklch, var(--accent) 45%, var(--line-strong));
+    color: var(--muted);
+}
+
+.app-omnibar-arrow {
+    color: var(--quiet);
+    font-size: 0.84rem;
+    line-height: 1;
+    transition: color 160ms var(--ease-state), transform 180ms var(--ease-native);
+}
+
+.app-omnibar-action.is-current .app-omnibar-arrow {
+    color: var(--accent);
+}
+
+.app-omnibar-action:hover .app-omnibar-arrow {
+    color: var(--accent);
+    transform: translate3d(1px, -1px, 0);
+}
+
 .app-bookmark-monogram {
     display: grid;
     width: 2rem;
     height: 2rem;
+    border: 1px solid var(--line-strong);
     border-radius: 0.35rem;
-    place-items: center;
+    color: var(--muted);
+    background: var(--panel-raised);
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
     font-size: 0.78rem;
     font-weight: 700;
-}
-
-.app-omnibar-glyph {
-    border: 1px solid color-mix(in oklch, var(--accent) 42%, var(--line-strong));
-    color: var(--accent);
-    background: oklch(0.14 0.009 75 / 0.86);
-}
-
-.app-bookmark-monogram {
-    border: 1px solid var(--line-strong);
-    color: var(--muted);
-    background: var(--panel-raised);
-}
-
-.app-omnibar-badge {
-    max-width: 9rem;
-    overflow: hidden;
-    padding: 0.15rem 0.42rem;
-    border: 1px solid color-mix(in oklch, var(--accent) 36%, var(--line));
-    border-radius: 0.25rem;
-    color: var(--accent);
-    background: oklch(0.16 0.012 75 / 0.78);
-    font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 0.58rem;
-    font-weight: 650;
-    letter-spacing: 0.04em;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    place-items: center;
 }
 
 .app-alias-badge {
@@ -1034,6 +1100,10 @@ html.app-route-root::-webkit-scrollbar {
     letter-spacing: -0.035em;
     line-height: 1.1;
     animation: app-inspector-item-in 420ms 110ms var(--ease-enter) backwards;
+}
+
+.app-inspector-inner.is-omnibar-inspector h2 {
+    margin-top: 1.65rem;
 }
 
 .app-inspector-url {
@@ -2185,8 +2255,8 @@ html.app-route-root::-webkit-scrollbar {
 
 .app-empty-omnibar-region {
     margin-top: 1.5rem;
-    padding-top: 1.15rem;
-    border-top: 1px solid var(--directory-line);
+    padding-top: 1.1rem;
+    border-top: 1px solid oklch(0.68 0.022 78 / 0.22);
     transition-property: opacity;
     transition-timing-function: var(--ease-state);
     animation: app-empty-item-in 560ms 290ms var(--ease-enter) backwards;
@@ -2202,7 +2272,7 @@ html.app-route-root::-webkit-scrollbar {
     align-items: center;
     justify-content: space-between;
     gap: 1.25rem;
-    min-height: 2.35rem;
+    min-height: 2.2rem;
 }
 
 .app-empty-search-wrap {
@@ -2210,7 +2280,7 @@ html.app-route-root::-webkit-scrollbar {
     display: flex;
     flex: 1 1 auto;
     min-width: 0;
-    min-height: 2.35rem;
+    min-height: 2.2rem;
     align-items: center;
 }
 
@@ -2218,53 +2288,31 @@ html.app-route-root::-webkit-scrollbar {
     position: absolute;
     left: 0;
     z-index: 2;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.55rem;
-    max-width: 100%;
-    height: 2.2rem;
-    padding: 0 0 0.3rem;
+    display: grid;
+    width: 1.4rem;
+    height: 2rem;
+    padding: 0;
     border: 0;
-    border-bottom: 1px solid var(--line-strong);
     color: var(--muted);
     background: transparent;
     cursor: pointer;
-    font: inherit;
-    font-size: 0.78rem;
-    white-space: nowrap;
-    transition:
-        color 160ms var(--ease-state),
-        border-color 220ms var(--ease-state);
+    place-items: center start;
+    transition: color 160ms var(--ease-state);
 }
 
 .app-empty-search-symbol {
     display: inline-grid;
-    flex: 0 0 auto;
-    width: 0.8rem;
-    color: var(--accent);
+    color: inherit;
     font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-    font-size: 0.74rem;
-    place-items: center start;
+    font-size: 0.76rem;
+    line-height: 1;
     transition: transform 220ms var(--ease-native), color 160ms var(--ease-state);
-}
-
-.app-empty-search-trigger-label {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    clip-path: inset(0);
-    opacity: 1;
-    transform: translate3d(0, 0, 0);
-    transition:
-        clip-path 380ms cubic-bezier(0.16, 1, 0.3, 1),
-        opacity 150ms ease,
-        transform 360ms var(--ease-enter);
 }
 
 .app-empty-search-trigger:hover,
 .app-empty-search-trigger:focus-visible {
     outline: none;
-    border-color: var(--accent);
-    color: var(--ink);
+    color: var(--accent);
 }
 
 .app-empty-search-wrap:not(.is-open) .app-empty-search-trigger:hover .app-empty-search-symbol,
@@ -2273,16 +2321,7 @@ html.app-route-root::-webkit-scrollbar {
 }
 
 .app-empty-search-wrap.is-open .app-empty-search-trigger {
-    width: 1.15rem;
-    border-bottom-color: transparent;
-    overflow: hidden;
-}
-
-.app-empty-search-wrap.is-open .app-empty-search-trigger-label {
-    opacity: 0;
-    clip-path: inset(0 100% 0 0);
-    transform: translate3d(-0.35rem, 0, 0);
-    pointer-events: none;
+    color: var(--accent);
 }
 
 .app-empty-search {
@@ -2373,7 +2412,7 @@ html.app-route-root::-webkit-scrollbar {
 }
 
 .app-empty-omnibar-result {
-    padding-top: 0.85rem;
+    padding-top: 0.65rem;
     opacity: 0;
     transform-origin: top center;
     transform: translate3d(0, -6px, 0) scale(0.99);
@@ -2388,10 +2427,6 @@ html.app-route-root::-webkit-scrollbar {
     transition:
         opacity 260ms 35ms var(--ease-enter),
         transform 420ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.app-empty-omnibar-result-card {
-    border-bottom: 1px solid var(--directory-line);
 }
 
 .app-empty-panel > .app-file-error {
@@ -2654,7 +2689,8 @@ html.app-route-root::-webkit-scrollbar {
     }
 
     .app-bookmark-tail .app-tier,
-    .app-bookmark-tail .app-alias-badge {
+    .app-bookmark-tail .app-alias-badge,
+    .app-omnibar-kbd {
         display: none;
     }
 

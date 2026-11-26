@@ -26,7 +26,6 @@ import {
 import {
   buildWebSearchUrl,
   getActiveSearchEngine,
-  getOmnibarGlyph,
   resolveEmptyOmnibarState,
   resolveOmnibar,
   resolveTabCompletion,
@@ -1362,6 +1361,7 @@ function App() {
                     emptyOmnibar.isSearchExpanded ? 'Focus search' : 'Open search'
                   }
                   aria-expanded={emptyOmnibar.isSearchExpanded}
+                  title="Search (/)"
                   tabIndex={emptyOmnibar.triggerTabIndex}
                   onClick={() => {
                     setSearchOpen(true);
@@ -1369,9 +1369,6 @@ function App() {
                   }}
                 >
                   <span className="app-empty-search-symbol" aria-hidden="true">/</span>
-                  <span className="app-empty-search-trigger-label">
-                    Search web, !bangs, or URL
-                  </span>
                 </button>
                 <label
                   className="app-empty-search"
@@ -1420,37 +1417,33 @@ function App() {
             >
               <div className="app-empty-omnibar-drawer-inner">
                 <div className="app-empty-omnibar-result">
-                  <div className="app-empty-omnibar-result-card">
-                    <a
-                      href={emptyDisplayedAction.url}
-                      draggable={false}
-                      onDragStart={(event) => event.preventDefault()}
-                      tabIndex={emptyOmnibar.resultTabIndex}
-                      className="app-omnibar-action is-current is-keyboard-current"
-                    >
-                      {emptyDisplayedAction.iconUrl ? (
-                        <img
-                          src={emptyDisplayedAction.iconUrl}
-                          alt=""
-                          draggable={false}
-                        />
-                      ) : (
-                        <span className="app-omnibar-glyph" aria-hidden="true">
-                          {getOmnibarGlyph(emptyDisplayedAction)}
-                        </span>
-                      )}
-                      <span className="app-bookmark-copy">
-                        <strong>{emptyDisplayedAction.title}</strong>
-                        <small>{emptyDisplayedAction.subtitle}</small>
+                  <a
+                    href={emptyDisplayedAction.url}
+                    draggable={false}
+                    onDragStart={(event) => event.preventDefault()}
+                    tabIndex={emptyOmnibar.resultTabIndex}
+                    className="app-omnibar-action is-current is-keyboard-current"
+                  >
+                    <span className="app-omnibar-copy">
+                      <span className="app-omnibar-title">
+                        {emptyDisplayedAction.title}
                       </span>
-                      <span className="app-bookmark-tail">
-                        <code className="app-omnibar-badge">
+                      <span className="app-omnibar-meta">
+                        {emptyDisplayedAction.subtitle}
+                      </span>
+                    </span>
+                    <span className="app-omnibar-tail">
+                      {emptyDisplayedAction.badge.startsWith('!') && (
+                        <code className="app-omnibar-tag">
                           {emptyDisplayedAction.badge}
                         </code>
-                        <b aria-hidden="true">↗</b>
-                      </span>
-                    </a>
-                  </div>
+                      )}
+                      <kbd className="app-omnibar-kbd" aria-hidden="true">
+                        Enter
+                      </kbd>
+                      <span className="app-omnibar-arrow" aria-hidden="true">↗</span>
+                    </span>
+                  </a>
                 </div>
               </div>
             </div>
@@ -1779,20 +1772,21 @@ function App() {
                   setSelectionOverride({ kind: 'omnibar' });
                 }}
               >
-                {omnibarAction.iconUrl ? (
-                  <img src={omnibarAction.iconUrl} alt="" draggable={false} />
-                ) : (
-                  <span className="app-omnibar-glyph" aria-hidden="true">
-                    {getOmnibarGlyph(omnibarAction)}
-                  </span>
-                )}
-                <span className="app-bookmark-copy">
-                  <strong>{omnibarAction.title}</strong>
-                  <small>{omnibarAction.subtitle}</small>
+                <span className="app-omnibar-copy">
+                  <span className="app-omnibar-title">{omnibarAction.title}</span>
+                  <span className="app-omnibar-meta">{omnibarAction.subtitle}</span>
                 </span>
-                <span className="app-bookmark-tail">
-                  <code className="app-omnibar-badge">{omnibarAction.badge}</code>
-                  <b aria-hidden="true">↗</b>
+                <span className="app-omnibar-tail">
+                  {omnibarAction.badge.startsWith('!') && (
+                    <code className="app-omnibar-tag">{omnibarAction.badge}</code>
+                  )}
+                  {(effectiveTarget?.kind === 'omnibar'
+                    || omnibarAction.kind === 'web-search') && (
+                    <kbd className="app-omnibar-kbd" aria-hidden="true">
+                      {effectiveTarget?.kind === 'omnibar' ? 'Enter' : 'Shift + Enter'}
+                    </kbd>
+                  )}
+                  <span className="app-omnibar-arrow" aria-hidden="true">↗</span>
                 </span>
               </a>
             </div>
@@ -2096,12 +2090,9 @@ function App() {
         ) : effectiveTarget?.kind === 'omnibar' ? (
           <div
             key={effectiveTarget.action.url}
-            className={`app-inspector-inner${keyboardSelection ? ' is-instant' : ''}`}
+            className={`app-inspector-inner is-omnibar-inspector${keyboardSelection ? ' is-instant' : ''}`}
           >
             <p className="app-kicker">Omnibar destination</p>
-            <div className="app-inspector-monogram" aria-hidden="true">
-              {getOmnibarGlyph(effectiveTarget.action)}
-            </div>
             <h2>{effectiveTarget.action.title}</h2>
             <p className="app-inspector-location">
               {omnibarKindLabel(effectiveTarget.action.kind)}
