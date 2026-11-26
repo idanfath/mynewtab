@@ -20,8 +20,6 @@ import SectionDialog from './SectionDialog.tsx';
 import SnapshotDialog from './SnapshotDialog.tsx';
 import {
   getFaviconUrl,
-  normalizeAlias,
-  normalizeSearchUrl,
   normalizeUrl,
   safeHostname,
   urlIdentity,
@@ -33,9 +31,11 @@ import {
   resolveEmptyOmnibarState,
   resolveOmnibar,
   resolveTabCompletion,
+  serializeSettingsJson,
   type OmnibarAction,
   type OmnibarActionKind,
   type OmnibarSettings,
+  type ParsedSettingsImport,
 } from './omnibar.ts';
 import TypewriterText, { TYPEWRITER_DURATION } from './TypewriterText.tsx';
 import { useBookmarks, storageError, type AppError } from './useBookmarks.ts';
@@ -47,6 +47,11 @@ import {
   UndoNotice,
 } from './notices.tsx';
 import { formatBookmarkError } from './formatBookmarkError.ts';
+import {
+  commitPairedBookmarksAndSettingsToStorage,
+  prepareImportBatch,
+  type ImportFileInput,
+} from './settingsImport.ts';
 import { tierRank } from './tierRank.ts';
 import {
   BOOKMARK_DRAG_TYPE,
@@ -64,6 +69,8 @@ import {
   STORAGE_KEY,
   applyBookmarkSave,
   findMatchingBookmark,
+  formatBookmarkShortcutBadges,
+  getBookmarkShortcuts,
   groupBookmarksBySection,
   insertBookmarkInSection,
   moveBookmarkToSection,
@@ -75,7 +82,6 @@ import {
 } from './bookmarks.ts';
 import {
   parseEditorBookmarks,
-  parseImportedBookmarkFile,
   serializeBookmarksHtml,
   type BookmarkFileFormat,
 } from './bookmarkHtml.ts';
@@ -99,6 +105,7 @@ import {
 } from './storageSync.ts';
 import {
   downloadTextFile,
+  downloadTextFiles,
   focusConflictBanner,
   restoreFocusSafely,
 } from './dialogFocus.ts';
@@ -107,8 +114,8 @@ import './App.css';
 const EMPTY_HEADING = 'Bring your index.';
 const DROP_HEADING = 'Drop your file.';
 const URL_DROP_HEADING = 'Drop your URL.';
-const EMPTY_COPY = 'Choose bookmarks.json or browser bookmarks.html. Everything stays in this browser.';
-const DROP_COPY = 'Drop bookmarks.json or bookmarks.html anywhere. Everything stays in this browser.';
+const EMPTY_COPY = 'Choose bookmarks.json, settings.json, or browser bookmarks.html. Everything stays in this browser.';
+const DROP_COPY = 'Drop bookmarks.json, settings.json, or bookmarks.html anywhere. Everything stays in this browser.';
 const URL_DROP_COPY = 'Drop your URL anywhere. It will be saved locally in the Uncategorized section.';
 
 type BookmarkDialogState =
@@ -126,6 +133,10 @@ interface ImportMergeDialogState {
   bookmarks: Bookmark[];
   skippedNonHttpCount: number;
   intraFileDuplicateCount: number;
+  pendingSettings?: {
+    fileName: string;
+    parsed: ParsedSettingsImport;
+  };
 }
 
 interface ContextMenuState {
@@ -163,7 +174,7 @@ function getBookmarkMonogram(bookmark: Bookmark): string {
 function omnibarKindLabel(kind: OmnibarActionKind): string {
   switch (kind) {
     case 'bang-search':
-      return 'Site search';
+      return 'Shortcut query';
     case 'bang-jump':
       return 'Shortcut jump';
     case 'bang-incomplete':
@@ -228,8 +239,10 @@ function App() {
   } = useBookmarks();
   const {
     omnibarSettings,
+    extraSettingsSections,
     initialOmnibarError,
     persistOmnibarSettings,
+    applyOmnibarSettingsState,
     refreshOmnibarFromStorage,
   } = useOmnibarSettings();
   const [query, setQuery] = useState('');
@@ -531,11 +544,24 @@ function App() {
     restoreFocusSafely(modalTriggerRef.current);
   }, []);
 
+  const openSearchSettings = useCallback(() => {
+    captureModalOpenContext();
+    setExportMenuOpen(false);
+    setContextMenu(null);
+    setSearchSettingsOpen(true);
+  }, [captureModalOpenContext]);
+
+  const closeSearchSettings = useCallback(() => {
+    setSearchSettingsOpen(false);
+    restoreFocusSafely(modalTriggerRef.current);
+  }, []);
+
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const isTyping = target?.isContentEditable
-        || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '');
+        || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName ?? '')
+        || target?.getAttribute('role') === 'combobox';
       if (
         isTyping
         || event.isComposing
@@ -803,23 +829,6 @@ function App() {
     else window.location.assign(destination);
   };
 
-  const activateBookmarkSiteSearch = (bookmark: Bookmark) => {
-    const alias = normalizeAlias(bookmark.alias ?? '');
-    if (!alias || !normalizeSearchUrl(bookmark.searchUrl ?? '')) return;
-    const nextQuery = `!${alias} `;
-    setSearchOpen(true);
-    setQuery(nextQuery);
-    setSelectionOverride(null);
-    setKeyboardSelection(true);
-    window.requestAnimationFrame(() => {
-      const input = searchRef.current;
-      if (input) {
-        input.focus();
-        input.setSelectionRange(nextQuery.length, nextQuery.length);
-      }
-    });
-  };
-
   const selectRelativeItem = (direction: 1 | -1) => {
     if (!navItems.length) return;
     const currentIndex = effectiveTarget
@@ -960,9 +969,29 @@ function App() {
     if (!persistOmnibarSettings(next)) {
       return 'Browser storage is full, blocked, or unavailable.';
     }
-    setSearchSettingsOpen(false);
+    closeSearchSettings();
     setStatusToast({ title: 'Search settings saved' });
     return null;
+  };
+
+  const importSettingsFromDialog = (
+    parsed: ParsedSettingsImport,
+    fileName: string,
+  ): string | null => {
+    if (!persistOmnibarSettings(parsed.settings, parsed.extraSections)) {
+      return 'Browser storage is full, blocked, or unavailable.';
+    }
+    setStatusToast({ title: 'Search settings imported', detail: fileName });
+    return null;
+  };
+
+  const exportSettingsFile = (draft: OmnibarSettings) => {
+    downloadTextFile(
+      'settings.json',
+      serializeSettingsJson(draft, extraSettingsSections),
+      'application/json',
+    );
+    setStatusToast({ title: 'Exported settings', detail: 'settings.json' });
   };
 
   const checkPreWriteConflict = (
@@ -1135,29 +1164,92 @@ function App() {
     commitBookmarkMove(nextBookmarks, source, targetSection, true);
   };
 
-  const importFile = async (file: File) => {
-    let content: string;
-    try {
-      content = await file.text();
-    } catch {
+  const commitPairedBookmarksAndSettings = (
+    nextBookmarks: Bookmark[],
+    nextSettings: ParsedSettingsImport,
+    persistOptions?: { snapshots?: SnapshotRequest[] },
+  ): { ok: true; snapshotWarning?: 'snapshot-quota-exceeded' } | { ok: false } => {
+    const result = commitPairedBookmarksAndSettingsToStorage({
+      storage: getLocalStorageSafely(),
+      nextSettings,
+      persistBookmarks: () => persistWithMeta(nextBookmarks, null, persistOptions),
+    });
+    if (!result.ok) {
+      return result;
+    }
+
+    applyOmnibarSettingsState(nextSettings.settings, nextSettings.extraSections);
+    return result;
+  };
+
+  const importFiles = async (files: File[]) => {
+    if (files.length === 0) return;
+
+    if (files.length > 2) {
       setError({
-        title: 'Couldn’t read file',
-        detail: 'Choose a readable JSON or HTML bookmark file and try again.',
+        title: 'Too many files',
+        detail: 'Choose at most two files at once (one bookmarks file and one settings.json file).',
       });
       return;
     }
 
-    let parsed;
-    try {
-      parsed = parseImportedBookmarkFile(content, file.name);
-    } catch (parseError) {
-      setError(formatBookmarkError(parseError, content, 'Couldn’t import bookmarks'));
+    const inputs: ImportFileInput[] = [];
+    for (const file of files) {
+      const supportedType = isBookmarkFileName(file.name) || isBookmarkFileMime(file.type);
+      if (!supportedType) {
+        inputs.push({ name: file.name, content: '', supportedType: false });
+        continue;
+      }
+      let content: string;
+      try {
+        content = await file.text();
+      } catch {
+        setError({
+          title: 'Couldn’t read file',
+          detail: files.length > 1
+            ? `${file.name}: choose a readable JSON or HTML file and try again.`
+            : 'Choose a readable JSON or HTML file and try again.',
+        });
+        return;
+      }
+      inputs.push({ name: file.name, content, supportedType: true });
+    }
+
+    const batch = prepareImportBatch(inputs);
+    if (!batch.ok) {
+      setError(batch.error);
       return;
     }
 
+    if (batch.settings && !batch.bookmarks) {
+      if (
+        !persistOmnibarSettings(
+          batch.settings.parsed.settings,
+          batch.settings.parsed.extraSections,
+        )
+      ) {
+        setError({
+          title: 'Couldn’t import settings',
+          detail: 'Browser storage is full, blocked, or unavailable. Existing settings were not changed.',
+        });
+        return;
+      }
+      if (!corruptBackup) setError(null);
+      setStatusToast({
+        title: 'Search settings imported',
+        detail: batch.settings.fileName,
+      });
+      return;
+    }
+
+    if (!batch.bookmarks) return;
+
+    const { fileName, parsed } = batch.bookmarks;
     if (bookmarks.length === 0) {
       const importedBookmarks = applyBookmarkMerge([], parsed.bookmarks, 'replace');
-      const result = persistWithMeta(importedBookmarks, null);
+      const result = batch.settings
+        ? commitPairedBookmarksAndSettings(importedBookmarks, batch.settings.parsed)
+        : persistWithMeta(importedBookmarks, null);
       if (!result.ok) {
         setError(storageError('Couldn’t import bookmarks'));
         return;
@@ -1170,11 +1262,17 @@ function App() {
       );
       setKeyboardSelection(false);
       if (!corruptBackup) setError(null);
+
+      const details: string[] = [];
+      if (batch.settings) details.push(`+ ${batch.settings.fileName}`);
+      if (parsed.skippedNonHttpCount > 0) {
+        details.push(
+          `${parsed.skippedNonHttpCount} non-web link${parsed.skippedNonHttpCount === 1 ? '' : 's'} skipped`,
+        );
+      }
       setStatusToast({
         title: `Imported ${importedBookmarks.length} bookmark${importedBookmarks.length === 1 ? '' : 's'}`,
-        detail: parsed.skippedNonHttpCount > 0
-          ? `${parsed.skippedNonHttpCount} non-web link${parsed.skippedNonHttpCount === 1 ? '' : 's'} skipped`
-          : undefined,
+        detail: details.length > 0 ? details.join(' · ') : undefined,
       });
       return;
     }
@@ -1183,11 +1281,12 @@ function App() {
     captureEditBaseline(bookmarks);
     if (!corruptBackup) setError(null);
     setImportMergeDialog({
-      fileName: file.name,
+      fileName,
       format: parsed.format,
       bookmarks: parsed.bookmarks,
       skippedNonHttpCount: parsed.skippedNonHttpCount,
       intraFileDuplicateCount: parsed.intraFileDuplicateCount,
+      pendingSettings: batch.settings,
     });
   };
 
@@ -1207,6 +1306,32 @@ function App() {
       importMergeDialog.bookmarks,
       strategy,
     );
+    const bookmarksChanged = computeBookmarksHash(nextBookmarks) !== computeBookmarksHash(bookmarks);
+    const pendingSettings = importMergeDialog.pendingSettings;
+
+    if (
+      !bookmarksChanged
+      && pendingSettings
+      && !(options?.overwriteExternalConflict && conflictForBackup)
+    ) {
+      if (
+        !persistOmnibarSettings(
+          pendingSettings.parsed.settings,
+          pendingSettings.parsed.extraSections,
+        )
+      ) {
+        return 'Browser storage is full, blocked, or unavailable. Settings were not changed.';
+      }
+      if (!corruptBackup) setError(null);
+      setExternalConflict(null);
+      setImportMergeDialog(null);
+      restoreFocusSafely(modalTriggerRef.current);
+      setStatusToast({
+        title: 'Search settings imported',
+        detail: pendingSettings.fileName,
+      });
+      return null;
+    }
 
     const snapshotRequests: SnapshotRequest[] = [];
     if (options?.overwriteExternalConflict && conflictForBackup) {
@@ -1223,11 +1348,15 @@ function App() {
         : `Before importing ${importMergeDialog.fileName}`,
     });
 
-    const result = persistWithMeta(nextBookmarks, null, {
-      snapshots: snapshotRequests,
-    });
+    const result = pendingSettings
+      ? commitPairedBookmarksAndSettings(nextBookmarks, pendingSettings.parsed, {
+          snapshots: snapshotRequests,
+        })
+      : persistWithMeta(nextBookmarks, null, {
+          snapshots: snapshotRequests,
+        });
     if (!result.ok) {
-      return 'Browser storage is full, blocked, or unavailable. Existing bookmarks were not changed.';
+      return 'Browser storage is full, blocked, or unavailable. Existing data was not changed.';
     }
 
     const nextSection = strategy === 'replace'
@@ -1253,8 +1382,11 @@ function App() {
         detail: 'External tab version backed up to History',
       });
     } else {
+      const baseTitle = strategy === 'replace'
+        ? (pendingSettings ? 'Directory & settings replaced' : 'Directory replaced')
+        : (pendingSettings ? 'Bookmarks & settings imported' : 'Bookmarks imported');
       setStatusToast({
-        title: strategy === 'replace' ? 'Directory replaced' : 'Bookmarks imported',
+        title: baseTitle,
         detail: result.snapshotWarning
           ? 'Saved (storage full — history backup skipped)'
           : `${nextBookmarks.length} bookmark${nextBookmarks.length === 1 ? '' : 's'} in directory`,
@@ -1270,8 +1402,8 @@ function App() {
   };
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) await importFile(file);
+    const picked = Array.from(event.target.files ?? []);
+    if (picked.length > 0) await importFiles(picked);
     event.target.value = '';
   };
 
@@ -1468,31 +1600,15 @@ function App() {
     resetDropState();
 
     if (files.length > 0) {
-      const bookmarkFiles = files.filter(
+      const hasImportCandidate = files.some(
         (file) => isBookmarkFileName(file.name) || isBookmarkFileMime(file.type),
       );
-      if (bookmarkFiles.length > 1) {
-        setError({
-          title: 'Couldn’t import bookmarks',
-          detail: 'Drop one JSON or HTML file at a time.',
-        });
-        return;
-      }
-      if (bookmarkFiles.length === 1 && files.length === 1) {
-        if (!corruptBackup) setError(null);
-        await importFile(bookmarkFiles[0]);
-        return;
-      }
-      if (readDroppedUrl(event.dataTransfer)) {
+      if (!hasImportCandidate && readDroppedUrl(event.dataTransfer)) {
         addDroppedUrl(event.dataTransfer, targetSection);
         return;
       }
-      setError({
-        title: 'Couldn’t import bookmarks',
-        detail: files.length > 1
-          ? 'Drop one JSON or HTML file at a time.'
-          : 'Drop a .json or .html bookmark file, or a webpage URL.',
-      });
+      if (!corruptBackup) setError(null);
+      await importFiles(files);
       return;
     }
 
@@ -1535,6 +1651,7 @@ function App() {
     const saveAttempt = applyBookmarkSave(bookmarks, nextBookmark, editingBookmark);
     if (!saveAttempt.ok) return saveAttempt.error;
     const nextBookmarks = saveAttempt.bookmarks;
+    const savedBookmark = saveAttempt.bookmark;
 
     const snapshotRequests: SnapshotRequest[] = [];
     if (options?.overwriteExternalConflict && conflictForBackup) {
@@ -1549,11 +1666,11 @@ function App() {
       snapshots: snapshotRequests,
     });
     if (result.ok) {
-      setSection(nextBookmark.section);
+      setSection(savedBookmark.section);
       setQuery('');
       setSearchOpen(false);
       searchRef.current?.blur();
-      setSelectionOverride({ kind: 'bookmark', bookmark: nextBookmark });
+      setSelectionOverride({ kind: 'bookmark', bookmark: savedBookmark });
       setKeyboardSelection(false);
       if (!corruptBackup) setError(null);
       setExternalConflict(null);
@@ -1911,12 +2028,22 @@ function App() {
 
   const exportJson = () => {
     closeExportMenu(true);
-    downloadTextFile(
-      'bookmarks.json',
-      JSON.stringify(bookmarks, null, 2),
-      'application/json',
-    );
-    setStatusToast({ title: 'Exported JSON', detail: 'bookmarks.json' });
+    downloadTextFiles([
+      {
+        filename: 'bookmarks.json',
+        content: JSON.stringify(bookmarks, null, 2),
+        mimeType: 'application/json',
+      },
+      {
+        filename: 'settings.json',
+        content: serializeSettingsJson(omnibarSettings, extraSettingsSections),
+        mimeType: 'application/json',
+      },
+    ]);
+    setStatusToast({
+      title: 'Exported JSON backup',
+      detail: 'bookmarks.json + settings.json',
+    });
   };
 
   const exportHtml = () => {
@@ -2139,14 +2266,9 @@ function App() {
     ? resolveDropSection(urlDropSection, section)
     : null;
   const isSearchExpanded = searchOpen || Boolean(query);
-  const inspectedAlias = inspectedBookmark
-    ? normalizeAlias(inspectedBookmark.alias ?? '')
-    : '';
-  const inspectedHasSiteSearch = Boolean(
-    inspectedBookmark
-    && inspectedAlias
-    && normalizeSearchUrl(inspectedBookmark.searchUrl ?? ''),
-  );
+  const inspectedShortcuts = inspectedBookmark
+    ? getBookmarkShortcuts(inspectedBookmark)
+    : [];
   const inspectedIconSrc = inspectedBookmark
     ? resolveBookmarkIconSrc(inspectedBookmark, 128)
     : undefined;
@@ -2166,6 +2288,7 @@ function App() {
       <input
         ref={fileRef}
         type="file"
+        multiple
         accept="application/json,text/html,.json,.html,.htm"
         hidden
         onChange={handleFile}
@@ -2209,7 +2332,7 @@ function App() {
                 tabIndex={dropActive ? -1 : undefined}
                 onClick={chooseFile}
               >
-                Choose JSON or HTML
+                Choose files
                 <span className="app-load-arrow" aria-hidden="true">↗</span>
               </button>
               <button
@@ -2295,7 +2418,7 @@ function App() {
                   tabIndex={dropActive ? -1 : undefined}
                   onClick={() => {
                     if (!query) setSearchOpen(false);
-                    setSearchSettingsOpen(true);
+                    openSearchSettings();
                   }}
                 >
                   Search settings
@@ -2520,11 +2643,7 @@ function App() {
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setExportMenuOpen(false);
-                  setContextMenu(null);
-                  setSearchSettingsOpen(true);
-                }}
+                onClick={openSearchSettings}
               >
                 Search
               </button>
@@ -2705,7 +2824,8 @@ function App() {
                           effectiveTarget?.kind === 'bookmark'
                           && effectiveTarget.bookmark === bookmark;
                         const iconSrc = resolveBookmarkIconSrc(bookmark, 64);
-                        const bookmarkAlias = normalizeAlias(bookmark.alias ?? '');
+                        const { visible: visibleShortcuts, overflowCount } =
+                          formatBookmarkShortcutBadges(bookmark);
                         return (
                           <a
                             key={key}
@@ -2788,8 +2908,19 @@ function App() {
                               </small>
                             </span>
                             <span className="app-bookmark-tail">
-                              {bookmarkAlias && (
-                                <code className="app-alias-badge">!{bookmarkAlias}</code>
+                              {(visibleShortcuts.length > 0 || overflowCount > 0) && (
+                                <span className="app-alias-group">
+                                  {visibleShortcuts.map((alias) => (
+                                    <code key={alias} className="app-alias-badge">
+                                      !{alias}
+                                    </code>
+                                  ))}
+                                  {overflowCount > 0 && (
+                                    <span className="app-alias-overflow">
+                                      +{overflowCount}
+                                    </span>
+                                  )}
+                                </span>
                               )}
                               {bookmark.tier && (
                                 <em
@@ -2888,14 +3019,26 @@ function App() {
                       <dt>Group</dt><dd>{inspectedBookmark.subsection}</dd>
                     </div>
                   )}
-                  {inspectedAlias && (
+                  {inspectedShortcuts.length > 0 && (
                     <div className="app-meta-row">
-                      <dt>Shortcut</dt><dd><code>!{inspectedAlias}</code></dd>
+                      <dt>{inspectedShortcuts.length === 1 ? 'Shortcut' : 'Shortcuts'}</dt>
+                      <dd>
+                        <ul className="app-inspector-shortcuts">
+                          {inspectedShortcuts.map((shortcut) => (
+                            <li key={shortcut.alias} className="app-inspector-shortcut-item">
+                              <code>!{shortcut.alias}</code>
+                              {shortcut.queryUrl && (
+                                <span className="app-meta-code">{shortcut.queryUrl}</span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </dd>
                     </div>
                   )}
-                  {inspectedBookmark.searchUrl && (
+                  {inspectedShortcuts.length === 0 && inspectedBookmark.searchUrl && (
                     <div className="app-meta-row">
-                      <dt>Search</dt>
+                      <dt>Query</dt>
                       <dd className="app-meta-code">{inspectedBookmark.searchUrl}</dd>
                     </div>
                   )}
@@ -2919,14 +3062,6 @@ function App() {
                   <MetaList label="Watch" values={inspectedBookmark.cons} />
                 </dl>
                 <div className="app-inspector-actions">
-                  {inspectedHasSiteSearch && (
-                    <button
-                      type="button"
-                      onClick={() => activateBookmarkSiteSearch(inspectedBookmark)}
-                    >
-                      Search site
-                    </button>
-                  )}
                   <button
                     type="button"
                     onClick={() => openBookmarkDialog({
@@ -3015,7 +3150,7 @@ function App() {
               <span aria-hidden="true">↗</span>
               <div>
                 <strong>Drop file to import</strong>
-                <small>Review changes in Import Studio (.json or .html)</small>
+                <small>Bookmarks (.json / .html) or settings.json</small>
               </div>
             </div>
           )}
@@ -3070,10 +3205,6 @@ function App() {
               onOpenNewTab={(bookmark) => {
                 closeContextMenu(contextMenu.openedBy === 'keyboard');
                 window.open(normalizeUrl(bookmark.url), '_blank', 'noopener,noreferrer');
-              }}
-              onSearchSite={(bookmark) => {
-                closeContextMenu(false);
-                activateBookmarkSiteSearch(bookmark);
               }}
               onCopyUrl={(bookmark) => {
                 closeContextMenu(contextMenu.openedBy === 'keyboard');
@@ -3173,6 +3304,7 @@ function App() {
           incomingBookmarks={importMergeDialog.bookmarks}
           skippedNonHttpCount={importMergeDialog.skippedNonHttpCount}
           intraFileDuplicateCount={importMergeDialog.intraFileDuplicateCount}
+          pendingSettingsFileName={importMergeDialog.pendingSettings?.fileName}
           conflict={externalConflict}
           onLoadExternal={handleLoadExternalChanges}
           onCancel={cancelImportMerge}
@@ -3198,8 +3330,10 @@ function App() {
         <SearchSettingsDialog
           settings={omnibarSettings}
           bookmarks={bookmarks}
-          onCancel={() => setSearchSettingsOpen(false)}
+          onCancel={closeSearchSettings}
           onSave={saveOmnibarSettings}
+          onImportSettings={importSettingsFromDialog}
+          onExportSettings={exportSettingsFile}
         />
       )}
 

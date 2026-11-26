@@ -47,11 +47,11 @@ test('enrichBookmark preserves curated core fields, normalizes iconUrl, and pres
   assert.deepEqual(enriched.categories, ['Code', 'Git', 'OSS']);
   assert.deepEqual(enriched.pros, ['Fast']);
   assert.deepEqual(enriched.cons, ['Rate limits']);
-  assert.equal((enriched as unknown as Record<string, unknown>).alias, 'gh');
-  assert.equal(
-    (enriched as unknown as Record<string, unknown>).searchUrl,
-    'https://github.com/search?q=%s',
-  );
+  assert.deepEqual(enriched.shortcuts, [
+    { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+  ]);
+  assert.equal((enriched as unknown as Record<string, unknown>).alias, undefined);
+  assert.equal((enriched as unknown as Record<string, unknown>).searchUrl, undefined);
 
   // Exact reference preserved on no-op enrichment
   const noop = enrichBookmark(enriched, {
@@ -411,13 +411,70 @@ test('enriches alias and searchUrl while stripping colliding incoming aliases so
   const merged = applyBookmarkMerge(existing, incoming, 'merge');
   assert.equal(mergePreview.changedCount, 1);
   assert.equal(mergePreview.addedCount, 1);
-  assert.equal(merged[1].alias, 'docs');
-  assert.equal(merged[1].searchUrl, 'https://docs.example/search?q=%s');
+  assert.deepEqual(merged[1].shortcuts, [
+    { alias: 'docs', queryUrl: 'https://docs.example/search?q=%s' },
+  ]);
+  assert.equal(merged[1].alias, undefined);
+  assert.equal(merged[1].searchUrl, undefined);
+  assert.equal(merged[2].shortcuts, undefined);
   assert.equal(merged[2].alias, undefined);
-  assert.equal(merged[2].searchUrl, 'https://gitea.example/search?q=%s');
+  assert.equal(merged[2].searchUrl, undefined);
   assert.equal(parseBookmarks(JSON.stringify(merged)).length, 3);
 
   const appended = applyBookmarkMerge(existing, incoming, 'append');
+  assert.equal(appended[2].shortcuts, undefined);
   assert.equal(appended[2].alias, undefined);
+  assert.equal(appended[2].searchUrl, undefined);
   assert.equal(parseBookmarks(JSON.stringify(appended)).length, 3);
+});
+
+test('multi-shortcut merge enriches self-owned queryUrl, appends non-colliding shortcuts, and strips colliding shortcuts cleanly', async () => {
+  const { parseBookmarks } = await import('../src/bookmarks.ts');
+
+  const existing: Bookmark[] = [
+    {
+      title: 'GitHub',
+      url: 'https://github.com/',
+      section: 'Dev',
+      shortcuts: [{ alias: 'gh' }],
+    },
+    {
+      title: 'Taken',
+      url: 'https://taken.example/',
+      section: 'Dev',
+      shortcuts: [{ alias: 'tk' }],
+    },
+  ];
+
+  const incoming: Bookmark[] = [
+    {
+      title: 'GitHub',
+      url: 'https://github.com',
+      section: 'Dev',
+      shortcuts: [
+        { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' }, // enriches self-owned !gh
+        { alias: 'tk', queryUrl: 'https://github.com/issues?q=%s' }, // colliding with Taken -> skipped
+        { alias: 'ghr', queryUrl: 'https://github.com/search?type=repositories&q=%s' }, // appended
+      ],
+    },
+    {
+      title: 'NewSite',
+      url: 'https://new.example/',
+      section: 'Dev',
+      shortcuts: [
+        { alias: 'tk', queryUrl: 'https://new.example/search?q=%s' }, // collides -> stripped
+        { alias: 'ns', queryUrl: 'https://new.example/find?q=%s' }, // kept
+      ],
+    },
+  ];
+
+  const merged = applyBookmarkMerge(existing, incoming, 'merge');
+  assert.deepEqual(merged[0].shortcuts, [
+    { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+    { alias: 'ghr', queryUrl: 'https://github.com/search?type=repositories&q=%s' },
+  ]);
+  assert.deepEqual(merged[2].shortcuts, [
+    { alias: 'ns', queryUrl: 'https://new.example/find?q=%s' },
+  ]);
+  assert.equal(parseBookmarks(JSON.stringify(merged)).length, 3);
 });

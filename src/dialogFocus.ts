@@ -90,5 +90,20 @@ export function downloadTextFile(
   document.body.appendChild(link);
   link.click();
   link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+export function downloadTextFiles(
+  files: ReadonlyArray<{ filename: string; content: string; mimeType: string }>,
+  staggerMs = 120,
+): void {
+  files.forEach((file, index) => {
+    if (index === 0) {
+      downloadTextFile(file.filename, file.content, file.mimeType);
+    } else {
+      window.setTimeout(() => {
+        downloadTextFile(file.filename, file.content, file.mimeType);
+      }, index * staggerMs);
+    }
+  });
 }

@@ -1,11 +1,11 @@
 import {
   STORAGE_KEY,
   findMatchingBookmark,
+  getBookmarkShortcuts,
   parseBookmarks,
   type Bookmark,
 } from './bookmarks.ts';
 import {
-  normalizeAlias,
   normalizeSearchUrl,
   normalizeUrl,
 } from './lib.ts';
@@ -79,22 +79,18 @@ export function normalizeExternalBookmarks(bookmarks: readonly Bookmark[]): Book
       delete next.iconUrl;
     }
 
-    const rawAlias = bookmark.alias?.trim();
-    if (rawAlias) {
-      const normalizedAlias = normalizeAlias(rawAlias);
-      if (normalizedAlias) next.alias = normalizedAlias;
-      else delete next.alias;
-    } else {
-      delete next.alias;
-    }
-
-    const rawSearch = bookmark.searchUrl?.trim();
-    if (rawSearch) {
-      const normalizedSearch = normalizeSearchUrl(rawSearch);
-      if (normalizedSearch) next.searchUrl = normalizedSearch;
-      else delete next.searchUrl;
-    } else {
-      delete next.searchUrl;
+    const shortcuts = getBookmarkShortcuts(bookmark);
+    delete next.alias;
+    delete next.searchUrl;
+    delete next.shortcuts;
+    if (shortcuts.length > 0) {
+      next.shortcuts = shortcuts;
+    } else if (bookmark.shortcuts === undefined) {
+      const rawSearch = bookmark.searchUrl?.trim();
+      if (rawSearch) {
+        const normalizedSearch = normalizeSearchUrl(rawSearch);
+        if (normalizedSearch) next.searchUrl = normalizedSearch;
+      }
     }
 
     for (const field of OPTIONAL_ARRAYS) {

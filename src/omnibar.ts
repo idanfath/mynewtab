@@ -1,8 +1,11 @@
 import {
   classifyStoredDataFailure,
+  findBookmarkShortcut,
+  getBookmarkShortcuts,
   type Bookmark,
   type StoredDataFailure,
 } from './bookmarks.ts';
+import { cloneWithoutProto } from './bookmarkMerge.ts';
 import {
   buildSearchUrl,
   getFaviconUrl,
@@ -55,6 +58,30 @@ export interface OmnibarSettings {
   customSearchUrl?: string;
   customBangs: CustomBang[];
   disabledBuiltInBangs?: string[];
+}
+
+export interface SettingsFileEnvelope {
+  kind: 'mynewtab-settings';
+  version: 1;
+  omnibar: OmnibarSettings;
+  [key: string]: unknown;
+}
+
+export interface ParsedSettingsImport {
+  settings: OmnibarSettings;
+  extraSections: Record<string, unknown>;
+}
+
+export interface BookmarkBangShortcutItem {
+  alias: string;
+  queryUrl?: string;
+  targetLabel: string;
+  overrideNote?: string;
+}
+
+export interface BookmarkBangDirectoryEntry {
+  bookmark: Bookmark;
+  shortcuts: BookmarkBangShortcutItem[];
 }
 
 export interface EmptyOmnibarViewState {
@@ -328,17 +355,53 @@ function compactUrlLabel(url: string): string {
   }
 }
 
-export function parseOmnibarSettings(content: string): OmnibarSettings {
-  if (!content.trim()) {
-    return { ...DEFAULT_OMNIBAR_SETTINGS, customBangs: [] };
-  }
+const SETTINGS_INDICATOR_KEYS = [
+  'omnibar',
+  'defaultEngine',
+  'customBangs',
+  'disabledBuiltInBangs',
+  'customSearchUrl',
+  'customSearchName',
+] as const;
 
-  const value: unknown = JSON.parse(content);
+export function isSettingsJsonObject(value: unknown): boolean {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('Expected a JSON object for omnibar settings.');
+    return false;
   }
-
   const record = value as Record<string, unknown>;
+  if (record.kind === 'mynewtab-settings') {
+    return true;
+  }
+  return SETTINGS_INDICATOR_KEYS.some((key) =>
+    Object.prototype.hasOwnProperty.call(record, key),
+  );
+}
+
+function sanitizeExtraSections(
+  extraSections?: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!extraSections) return out;
+  for (const [key, value] of Object.entries(extraSections)) {
+    if (
+      key === 'kind'
+      || key === 'version'
+      || key === 'omnibar'
+      || key === '__proto__'
+      || key === 'constructor'
+      || key === 'prototype'
+      || value === undefined
+    ) {
+      continue;
+    }
+    out[key] = cloneWithoutProto(value);
+  }
+  return out;
+}
+
+function validateOmnibarSettingsRecord(
+  record: Record<string, unknown>,
+): OmnibarSettings {
   if (record.version !== undefined && record.version !== 1) {
     throw new Error('Unsupported omnibar settings version.');
   }
@@ -487,6 +550,146 @@ export function parseOmnibarSettings(content: string): OmnibarSettings {
   return result;
 }
 
+function extractSettingsEnvelope(value: unknown): ParsedSettingsImport {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Expected a JSON object for omnibar settings.');
+  }
+
+  const record = value as Record<string, unknown>;
+  if (record.kind === 'mynewtab-settings') {
+    if (record.version !== undefined && record.version !== 1) {
+      throw new Error('Unsupported settings file version.');
+    }
+    if (
+      typeof record.omnibar !== 'object'
+      || record.omnibar === null
+      || Array.isArray(record.omnibar)
+    ) {
+      throw new Error('Settings file is missing an "omnibar" object.');
+    }
+    const settings = validateOmnibarSettingsRecord(
+      record.omnibar as Record<string, unknown>,
+    );
+    const extraSections = sanitizeExtraSections(record);
+    return { settings, extraSections };
+  }
+
+  return {
+    settings: validateOmnibarSettingsRecord(record),
+    extraSections: {},
+  };
+}
+
+export function parseOmnibarSettings(content: string): OmnibarSettings {
+  const stripped = content.replace(/^\uFEFF/, '');
+  if (!stripped.trim()) {
+    return { ...DEFAULT_OMNIBAR_SETTINGS, customBangs: [] };
+  }
+  const value: unknown = JSON.parse(stripped);
+  return extractSettingsEnvelope(value).settings;
+}
+
+export function parseSettingsFile(content: string): ParsedSettingsImport {
+  const stripped = content.replace(/^\uFEFF/, '').trim();
+  if (!stripped) {
+    throw new Error('No settings found in JSON file.');
+  }
+  const value: unknown = JSON.parse(stripped);
+  return extractSettingsEnvelope(value);
+}
+
+export function serializeSettingsJson(
+  settings: OmnibarSettings,
+  extraSections: Record<string, unknown> = {},
+): string {
+  const omnibar: Record<string, unknown> = {
+    defaultEngine: settings.defaultEngine,
+  };
+  if (settings.customSearchName?.trim()) {
+    omnibar.customSearchName = settings.customSearchName.trim();
+  }
+  if (settings.customSearchUrl?.trim()) {
+    omnibar.customSearchUrl = settings.customSearchUrl.trim();
+  }
+  omnibar.disabledBuiltInBangs = settings.disabledBuiltInBangs ?? [];
+  omnibar.customBangs = settings.customBangs;
+
+  const envelope: Record<string, unknown> = {
+    kind: 'mynewtab-settings',
+    version: 1,
+    omnibar,
+    ...sanitizeExtraSections(extraSections),
+  };
+  return JSON.stringify(envelope, null, 2);
+}
+
+export function serializeOmnibarStorageValue(
+  settings: OmnibarSettings,
+  extraSections?: Record<string, unknown>,
+): string {
+  const sanitizedExtra = sanitizeExtraSections(extraSections);
+  if (Object.keys(sanitizedExtra).length > 0) {
+    return JSON.stringify({
+      kind: 'mynewtab-settings',
+      version: 1,
+      omnibar: settings,
+      ...sanitizedExtra,
+    });
+  }
+  return JSON.stringify(settings);
+}
+
+export function collectBookmarkBangEntries(
+  bookmarks: readonly Bookmark[],
+  activeCustomTriggers: ReadonlySet<string>,
+  disabledBuiltInTriggers?: ReadonlySet<string>,
+): BookmarkBangDirectoryEntry[] {
+  const normalizedCustomTriggers = new Set<string>();
+  for (const trigger of activeCustomTriggers) {
+    const normalized = normalizeAlias(trigger);
+    if (normalized) normalizedCustomTriggers.add(normalized);
+  }
+  const normalizedDisabledBuiltIns = new Set<string>();
+  if (disabledBuiltInTriggers) {
+    for (const trigger of disabledBuiltInTriggers) {
+      const normalized = normalizeAlias(trigger);
+      if (normalized) normalizedDisabledBuiltIns.add(normalized);
+    }
+  }
+
+  const entries: BookmarkBangDirectoryEntry[] = [];
+  for (const bookmark of bookmarks) {
+    const rawShortcuts = getBookmarkShortcuts(bookmark);
+    if (rawShortcuts.length === 0) continue;
+
+    const shortcuts: BookmarkBangShortcutItem[] = rawShortcuts.map((sc) => {
+      let overrideNote: string | undefined;
+      if (sc.queryUrl && normalizedCustomTriggers.has(sc.alias)) {
+        overrideNote = 'Overrides custom !bang';
+      } else if (!sc.queryUrl && normalizedCustomTriggers.has(sc.alias)) {
+        overrideNote = `Bare !${sc.alias} opens bookmark · !${sc.alias} <query> uses custom !bang`;
+      } else if (
+        BUILT_IN_BANGS.some(
+          (b) => b.trigger === sc.alias && !normalizedDisabledBuiltIns.has(b.trigger),
+        )
+      ) {
+        overrideNote = 'Overrides built-in !bang';
+      }
+
+      const targetLabel = sc.queryUrl ?? `Jump to ${safeHostname(bookmark.url) || bookmark.url}`;
+      return {
+        alias: sc.alias,
+        ...(sc.queryUrl ? { queryUrl: sc.queryUrl } : {}),
+        targetLabel,
+        ...(overrideNote ? { overrideNote } : {}),
+      };
+    });
+
+    entries.push({ bookmark, shortcuts });
+  }
+  return entries;
+}
+
 export function resolvePreservedCustomBangHomeUrl(
   existingHomeUrl: string | undefined,
   initialSearchUrl: string | undefined,
@@ -517,16 +720,23 @@ export function loadStoredOmnibarSettings(
   storage: Pick<Storage, 'getItem' | 'setItem'>,
 ): {
   settings: OmnibarSettings;
+  extraSections?: Record<string, unknown>;
   recovery?: 'backed-up' | 'backup-failed';
   failure?: StoredDataFailure;
 } {
   const stored = storage.getItem(OMNIBAR_STORAGE_KEY);
-  if (!stored) {
+  if (!stored || !stored.trim()) {
     return { settings: { ...DEFAULT_OMNIBAR_SETTINGS, customBangs: [] } };
   }
 
   try {
-    return { settings: parseOmnibarSettings(stored) };
+    const parsed = parseSettingsFile(stored);
+    return {
+      settings: parsed.settings,
+      ...(Object.keys(parsed.extraSections).length > 0
+        ? { extraSections: parsed.extraSections }
+        : {}),
+    };
   } catch (parseError) {
     const failure = classifyStoredDataFailure(parseError);
     try {
@@ -736,10 +946,11 @@ export function resolveOmnibar(
     const seen = new Set<string>();
     const allTriggers: string[] = [];
     for (const bookmark of bookmarks) {
-      const alias = normalizeAlias(bookmark.alias ?? '');
-      if (alias && !seen.has(alias)) {
-        seen.add(alias);
-        allTriggers.push(alias);
+      for (const shortcut of getBookmarkShortcuts(bookmark)) {
+        if (!seen.has(shortcut.alias)) {
+          seen.add(shortcut.alias);
+          allTriggers.push(shortcut.alias);
+        }
       }
     }
     for (const custom of settings.customBangs) {
@@ -777,10 +988,9 @@ export function resolveOmnibar(
     // 1B: !token without space
     if (!hasWhitespace) {
       if (token !== '') {
-        const bookmarkMatch = bookmarks.find(
-          (b) => normalizeAlias(b.alias ?? '') === token,
-        );
-        if (bookmarkMatch) {
+        const bookmarkHit = findBookmarkShortcut(bookmarks, token, false);
+        if (bookmarkHit) {
+          const bookmarkMatch = bookmarkHit.bookmark;
           const jumpUrl = normalizeUrl(bookmarkMatch.url) || activeEngine.homeUrl;
           return {
             kind: 'bang-jump',
@@ -850,16 +1060,13 @@ export function resolveOmnibar(
     // 1C: !token with trailing whitespace and empty restQuery
     if (restQuery.trim() === '') {
       if (token !== '') {
-        const bookmarkWithSearch = bookmarks.find(
-          (b) =>
-            normalizeAlias(b.alias ?? '') === token
-            && Boolean(normalizeSearchUrl(b.searchUrl ?? '')),
-        );
-        if (bookmarkWithSearch) {
+        const bookmarkWithSearchHit = findBookmarkShortcut(bookmarks, token, true);
+        if (bookmarkWithSearchHit) {
+          const { bookmark: bookmarkWithSearch, shortcut } = bookmarkWithSearchHit;
           const jumpUrl =
             normalizeUrl(bookmarkWithSearch.url)
             || resolveTemplateHomeUrl(
-              bookmarkWithSearch.searchUrl!,
+              shortcut.queryUrl!,
               undefined,
               activeEngine.homeUrl,
             );
@@ -879,9 +1086,7 @@ export function resolveOmnibar(
             normalizeAlias(c.trigger) === token
             && Boolean(normalizeSearchUrl(c.searchUrl)),
         );
-        const jumpBookmark = bookmarks.find(
-          (b) => normalizeAlias(b.alias ?? '') === token,
-        );
+        const jumpBookmark = findBookmarkShortcut(bookmarks, token, false)?.bookmark;
         if (customMatch) {
           const jumpUrl =
             (jumpBookmark ? normalizeUrl(jumpBookmark.url) : '')
@@ -943,14 +1148,11 @@ export function resolveOmnibar(
     // 1D: !token restQuery
     const q = restQuery.trim();
     if (token !== '') {
-      // 1. Bookmark with valid searchUrl
-      const bookmarkWithSearch = bookmarks.find(
-        (b) =>
-          normalizeAlias(b.alias ?? '') === token
-          && Boolean(normalizeSearchUrl(b.searchUrl ?? '')),
-      );
-      if (bookmarkWithSearch) {
-        const url = buildSearchUrl(bookmarkWithSearch.searchUrl!, q);
+      // 1. Bookmark shortcut with valid queryUrl
+      const bookmarkWithSearchHit = findBookmarkShortcut(bookmarks, token, true);
+      if (bookmarkWithSearchHit) {
+        const { bookmark: bookmarkWithSearch, shortcut } = bookmarkWithSearchHit;
+        const url = buildSearchUrl(shortcut.queryUrl!, q);
         return {
           kind: 'bang-search',
           url,
@@ -980,10 +1182,8 @@ export function resolveOmnibar(
         };
       }
 
-      // 3. Bookmark without valid searchUrl
-      const bookmarkNoSearch = bookmarks.find(
-        (b) => normalizeAlias(b.alias ?? '') === token,
-      );
+      // 3. Bookmark shortcut without valid queryUrl
+      const bookmarkNoSearch = findBookmarkShortcut(bookmarks, token, false)?.bookmark;
       if (bookmarkNoSearch) {
         const bookmarkHost = safeHostname(bookmarkNoSearch.url);
         const builtIn = enabledBuiltInBangs.find((entry) => entry.trigger === token);
@@ -1056,12 +1256,8 @@ export function resolveOmnibar(
     const token = bareAliasMatch[1].toLowerCase();
     const restQuery = bareAliasMatch[2];
 
-    const bookmarkMatch = bookmarks.find(
-      (b) =>
-        normalizeAlias(b.alias ?? '') === token
-        && Boolean(normalizeSearchUrl(b.searchUrl ?? '')),
-    );
-    const customMatch = !bookmarkMatch
+    const bookmarkHit = findBookmarkShortcut(bookmarks, token, true);
+    const customMatch = !bookmarkHit
       ? settings.customBangs.find(
           (c) =>
             normalizeAlias(c.trigger) === token
@@ -1069,23 +1265,23 @@ export function resolveOmnibar(
         )
       : undefined;
 
-    if (bookmarkMatch || customMatch) {
+    if (bookmarkHit || customMatch) {
       const jumpBookmark =
-        bookmarkMatch
-        ?? bookmarks.find((b) => normalizeAlias(b.alias ?? '') === token);
-      const templateUrl = bookmarkMatch
-        ? bookmarkMatch.searchUrl!
+        bookmarkHit?.bookmark
+        ?? findBookmarkShortcut(bookmarks, token, false)?.bookmark;
+      const templateUrl = bookmarkHit
+        ? bookmarkHit.shortcut.queryUrl!
         : customMatch!.searchUrl;
-      const baseHomeUrl = bookmarkMatch
-        ? normalizeUrl(bookmarkMatch.url)
-          || resolveTemplateHomeUrl(bookmarkMatch.searchUrl!, undefined, activeEngine.homeUrl)
+      const baseHomeUrl = bookmarkHit
+        ? normalizeUrl(bookmarkHit.bookmark.url)
+          || resolveTemplateHomeUrl(bookmarkHit.shortcut.queryUrl!, undefined, activeEngine.homeUrl)
         : (jumpBookmark ? normalizeUrl(jumpBookmark.url) : '')
           || resolveTemplateHomeUrl(
             customMatch!.searchUrl,
             customMatch!.homeUrl,
             activeEngine.homeUrl,
           );
-      const label = bookmarkMatch ? bookmarkMatch.title : customMatch!.label;
+      const label = bookmarkHit ? bookmarkHit.bookmark.title : customMatch!.label;
       const iconUrl = jumpBookmark
         ? getBookmarkOmnibarIcon(jumpBookmark)
         : undefined;
@@ -1137,26 +1333,23 @@ export function resolveOmnibar(
     : '';
 
   if (wholeAlias) {
-    const inCurrentSection = sectionMatches.some(
-      (b) => normalizeAlias(b.alias ?? '') === wholeAlias,
+    const inCurrentSection = Boolean(
+      findBookmarkShortcut(sectionMatches, wholeAlias, false),
     );
     if (!inCurrentSection) {
-      const rescued = bookmarks.find(
-        (b) => normalizeAlias(b.alias ?? '') === wholeAlias,
-      );
-      if (rescued) {
-        const hasValidSearchUrl = Boolean(
-          normalizeSearchUrl(rescued.searchUrl ?? ''),
-        );
+      const rescuedMatch = findBookmarkShortcut(bookmarks, wholeAlias, false);
+      if (rescuedMatch) {
+        const rescued = rescuedMatch.bookmark;
+        const hasValidQueryUrl = Boolean(rescuedMatch.shortcut.queryUrl);
         return {
           kind: 'bookmark-alias',
           url: normalizeUrl(rescued.url) || activeEngine.homeUrl,
           title: `Jump to ${rescued.title}`,
-          subtitle: `!${wholeAlias} · in ${rescued.section}${hasValidSearchUrl ? ' · Tab to search site' : ''}`,
+          subtitle: `!${wholeAlias} · in ${rescued.section}${hasValidQueryUrl ? ' · Tab to enter query' : ''}`,
           badge: `!${wholeAlias}`,
           iconUrl: getBookmarkOmnibarIcon(rescued),
           autoSelect: true,
-          tabCompletion: hasValidSearchUrl ? `!${wholeAlias} ` : undefined,
+          tabCompletion: hasValidQueryUrl ? `!${wholeAlias} ` : undefined,
           matchedBookmark: rescued,
         };
       }
@@ -1203,9 +1396,15 @@ export function resolveTabCompletion(
   if (!rawQuery.trim()) return null;
 
   if (effectiveTarget?.kind === 'bookmark') {
-    const alias = normalizeAlias(effectiveTarget.bookmark.alias ?? '');
-    if (alias && normalizeSearchUrl(effectiveTarget.bookmark.searchUrl ?? '')) {
-      const completion = `!${alias} `;
+    const queryable = getBookmarkShortcuts(effectiveTarget.bookmark).filter((s) =>
+      Boolean(s.queryUrl),
+    );
+    if (queryable.length > 0) {
+      const rawToken = rawQuery.trim().replace(/^!/, '').toLowerCase();
+      const picked = queryable.find((s) => s.alias === rawToken)
+        ?? (rawToken ? queryable.find((s) => s.alias.startsWith(rawToken)) : undefined)
+        ?? queryable[0];
+      const completion = `!${picked.alias} `;
       return rawQuery !== completion ? completion : null;
     }
   }

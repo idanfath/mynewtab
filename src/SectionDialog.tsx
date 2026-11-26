@@ -1,4 +1,5 @@
 import { useRef, useState, type FormEvent } from 'react';
+import CustomSelect from './CustomSelect.tsx';
 import type { ExternalSyncConflict } from './storageSync.ts';
 import { ExternalConflictBanner } from './notices.tsx';
 import { focusConflictBanner, trapDialogTabKey } from './dialogFocus.ts';
@@ -133,25 +134,28 @@ export default function SectionDialog({
               <fieldset className="app-section-choices">
                 <legend>What should happen to {count} bookmark{count === 1 ? '' : 's'}?</legend>
                 {otherSections.length > 0 && (
-                  <label>
-                    <input
-                      type="radio"
-                      name="section-action"
-                      autoFocus={otherSections.length > 0}
-                      checked={effectiveStrategy === 'move'}
-                      onChange={() => setStrategy('move')}
-                    />
-                    <span>Move them to</span>
-                    <select
+                  <div className="app-section-choice">
+                    <label className="app-section-choice-head">
+                      <input
+                        type="radio"
+                        name="section-action"
+                        autoFocus={otherSections.length > 0}
+                        checked={effectiveStrategy === 'move'}
+                        onChange={() => setStrategy('move')}
+                      />
+                      <span>Move them to</span>
+                    </label>
+                    <CustomSelect
+                      ariaLabel="Destination section"
                       value={effectiveDestination}
                       disabled={effectiveStrategy !== 'move'}
-                      onChange={(event) => setDestination(event.target.value)}
-                    >
-                      {otherSections.map((sectionName) => (
-                        <option key={sectionName} value={sectionName}>{sectionName}</option>
-                      ))}
-                    </select>
-                  </label>
+                      options={otherSections.map((sectionName) => ({
+                        value: sectionName,
+                        label: sectionName,
+                      }))}
+                      onChange={setDestination}
+                    />
+                  </div>
                 )}
                 <label>
                   <input

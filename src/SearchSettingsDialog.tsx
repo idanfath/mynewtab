@@ -1,20 +1,39 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
-import type { Bookmark } from './bookmarks.ts';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from 'react';
+import { findBookmarkShortcut, type Bookmark } from './bookmarks.ts';
+import CustomSelect from './CustomSelect.tsx';
+import type { SelectOption } from './customSelectModel.ts';
+import { trapDialogTabKey } from './dialogFocus.ts';
 import { normalizeAlias, normalizeSearchUrl } from './lib.ts';
 import {
   BUILT_IN_BANGS,
   SEARCH_ENGINE_PRESETS,
+  collectBookmarkBangEntries,
+  parseSettingsFile,
   resolvePreservedCustomBangHomeUrl,
   type CustomBang,
   type OmnibarSettings,
+  type ParsedSettingsImport,
   type SearchEnginePresetId,
 } from './omnibar.ts';
+import {
+  formatSettingsError,
+  looksLikeBookmarkImportContent,
+} from './settingsImport.ts';
 
 interface SearchSettingsDialogProps {
   settings: OmnibarSettings;
   bookmarks: Bookmark[];
   onCancel: () => void;
   onSave: (next: OmnibarSettings) => string | null;
+  onImportSettings: (parsed: ParsedSettingsImport, fileName: string) => string | null;
+  onExportSettings: (draft: OmnibarSettings) => void;
 }
 
 interface CustomBangDraft {
@@ -34,11 +53,24 @@ const PRESET_ORDER: readonly Exclude<SearchEnginePresetId, 'custom'>[] = [
   'perplexity',
 ];
 
+const ENGINE_OPTIONS: ReadonlyArray<SelectOption<SearchEnginePresetId>> = [
+  ...PRESET_ORDER.map((id) => ({
+    value: id,
+    label: SEARCH_ENGINE_PRESETS[id].label,
+  })),
+  {
+    value: 'custom',
+    label: 'Custom search URL',
+  },
+];
+
 export default function SearchSettingsDialog({
   settings,
   bookmarks,
   onCancel,
   onSave,
+  onImportSettings,
+  onExportSettings,
 }: SearchSettingsDialogProps) {
   const [defaultEngine, setDefaultEngine] = useState<SearchEnginePresetId>(
     settings.defaultEngine,
@@ -72,6 +104,7 @@ export default function SearchSettingsDialog({
 
   const dialogRef = useRef<HTMLElement>(null);
   const addBangButtonRef = useRef<HTMLButtonElement>(null);
+  const settingsFileRef = useRef<HTMLInputElement>(null);
   const onCancelRef = useRef(onCancel);
 
   useEffect(() => {
@@ -132,8 +165,7 @@ export default function SearchSettingsDialog({
     setDisabledBuiltInBangs(new Set(BUILT_IN_BANGS.map((bang) => bang.trigger)));
   };
 
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  const validateDraftSettings = (): OmnibarSettings | null => {
     setError('');
 
     const next: OmnibarSettings = {
@@ -154,7 +186,7 @@ export default function SearchSettingsDialog({
         setError(
           'Custom search URL must be a valid http:// or https:// address containing %s.',
         );
-        return;
+        return null;
       }
       next.customSearchUrl = normalizedCustomUrl;
     } else if (trimmedCustomUrl) {
@@ -180,24 +212,24 @@ export default function SearchSettingsDialog({
         setError(
           `Custom !bang row ${i + 1}: trigger must be 1–32 letters, numbers, or hyphens.`,
         );
-        return;
+        return null;
       }
       if (seenTriggers.has(normalizedTrigger)) {
         setError(
           `Duplicate custom !bang trigger “!${normalizedTrigger}”. Each trigger must be unique.`,
         );
-        return;
+        return null;
       }
       if (!rawLabel) {
         setError(`Custom !bang “!${normalizedTrigger}” needs a display name.`);
-        return;
+        return null;
       }
       const normalizedSearch = normalizeSearchUrl(rawSearchUrl);
       if (!normalizedSearch) {
         setError(
-          `Custom !bang “!${normalizedTrigger}” needs a valid http:// or https:// search URL containing %s.`,
+          `Custom !bang “!${normalizedTrigger}” needs a valid http:// or https:// query URL containing %s.`,
         );
-        return;
+        return null;
       }
 
       seenTriggers.add(normalizedTrigger);
@@ -224,18 +256,109 @@ export default function SearchSettingsDialog({
     if (orderedDisabled.length > 0) {
       next.disabledBuiltInBangs = orderedDisabled;
     }
+    return next;
+  };
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const next = validateDraftSettings();
+    if (!next) return;
     const saveError = onSave(next);
     if (saveError) setError(saveError);
   };
 
-  const activeCustomTriggers = new Set(
-    customBangs
-      .map((row) => normalizeAlias(row.trigger))
-      .filter(Boolean),
+  const handleExportClick = () => {
+    const draft = validateDraftSettings();
+    if (!draft) return;
+    onExportSettings(draft);
+  };
+
+  const handleSettingsFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    let content: string;
+    try {
+      content = await file.text();
+    } catch {
+      setError('Couldn’t read that file. Choose a readable settings.json file.');
+      return;
+    }
+
+    if (looksLikeBookmarkImportContent(content, file.name)) {
+      setError(
+        'That file contains bookmarks — use Import in the sidebar or Choose files instead.',
+      );
+      return;
+    }
+    if (
+      !content.replace(/^\uFEFF/, '').trim()
+      && !file.name.toLocaleLowerCase().endsWith('.json')
+    ) {
+      setError('Choose a valid settings.json file.');
+      return;
+    }
+
+    let parsed: ParsedSettingsImport;
+    try {
+      parsed = parseSettingsFile(content);
+    } catch (parseErr) {
+      setError(formatSettingsError(parseErr, content).detail);
+      return;
+    }
+
+    const importError = onImportSettings(parsed, file.name);
+    if (importError) {
+      setError(importError);
+      return;
+    }
+
+    // Sync dialog draft to freshly imported settings
+    setDefaultEngine(parsed.settings.defaultEngine);
+    setCustomSearchName(parsed.settings.customSearchName ?? '');
+    setCustomSearchUrl(parsed.settings.customSearchUrl ?? '');
+    nextIdRef.current = parsed.settings.customBangs.length + 1;
+    setCustomBangs(
+      parsed.settings.customBangs.map((bang, index) => ({
+        id: index + 1,
+        trigger: bang.trigger,
+        label: bang.label,
+        searchUrl: bang.searchUrl,
+        initialSearchUrl: bang.searchUrl,
+        homeUrl: bang.homeUrl,
+      })),
+    );
+    setDisabledBuiltInBangs(
+      new Set(
+        (parsed.settings.disabledBuiltInBangs ?? [])
+          .map((trigger) => normalizeAlias(trigger))
+          .filter(Boolean),
+      ),
+    );
+    setError('');
+  };
+
+  const activeCustomTriggers = useMemo(
+    () =>
+      new Set(
+        customBangs
+          .map((row) => normalizeAlias(row.trigger))
+          .filter(Boolean),
+      ),
+    [customBangs],
   );
   const enabledBuiltInCount = BUILT_IN_BANGS.reduce(
     (count, bang) => count + (disabledBuiltInBangs.has(bang.trigger) ? 0 : 1),
     0,
+  );
+  const bookmarkBangEntries = useMemo(
+    () => collectBookmarkBangEntries(bookmarks, activeCustomTriggers, disabledBuiltInBangs),
+    [bookmarks, activeCustomTriggers, disabledBuiltInBangs],
+  );
+  const totalBookmarkShortcuts = useMemo(
+    () => bookmarkBangEntries.reduce((sum, entry) => sum + entry.shortcuts.length, 0),
+    [bookmarkBangEntries],
   );
 
   return (
@@ -252,7 +375,24 @@ export default function SearchSettingsDialog({
         aria-modal="true"
         aria-labelledby="app-search-settings-title"
         tabIndex={-1}
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing || event.defaultPrevented) return;
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            onCancel();
+            return;
+          }
+          trapDialogTabKey(event, dialogRef.current);
+        }}
       >
+        <input
+          ref={settingsFileRef}
+          type="file"
+          accept="application/json,.json"
+          hidden
+          onChange={(event) => { void handleSettingsFileChange(event); }}
+        />
+
         <form onSubmit={submit}>
           <header>
             <div>
@@ -266,25 +406,22 @@ export default function SearchSettingsDialog({
 
           <div className="app-form-body">
             <div className="app-form-grid">
-              <label className="is-wide">
-                <span>Default search engine</span>
-                <select
+              <div className="app-form-field is-wide">
+                <span id="app-default-engine-label">Default search engine</span>
+                <CustomSelect
+                  ariaLabelledBy="app-default-engine-label"
                   autoFocus
                   value={defaultEngine}
-                  onChange={(event) =>
-                    setDefaultEngine(event.target.value as SearchEnginePresetId)}
-                >
-                  {PRESET_ORDER.map((id) => (
-                    <option key={id} value={id}>
-                      {SEARCH_ENGINE_PRESETS[id].label}
-                    </option>
-                  ))}
-                  <option value="custom">Custom search URL</option>
-                </select>
+                  options={ENGINE_OPTIONS}
+                  onChange={(nextEngine) => {
+                    setDefaultEngine(nextEngine);
+                    setError('');
+                  }}
+                />
                 <small>
                   Used for web search fallback and Shift+Enter in the omnibar.
                 </small>
-              </label>
+              </div>
 
               {defaultEngine === 'custom' && (
                 <>
@@ -306,96 +443,6 @@ export default function SearchSettingsDialog({
                     />
                   </label>
                 </>
-              )}
-            </div>
-
-            <div className="app-bang-section">
-              <div className="app-bang-section-header">
-                <div>
-                  <span className="app-bang-section-label">Custom !bangs</span>
-                  <p className="app-bang-section-hint">
-                    Type <code>!trigger query</code> or <code>trigger query</code> in the omnibar.
-                  </p>
-                </div>
-                <button
-                  ref={addBangButtonRef}
-                  type="button"
-                  className="app-bang-add-button"
-                  onClick={addRow}
-                >
-                  + Add !bang
-                </button>
-              </div>
-
-              {customBangs.length > 0 ? (
-                <div className="app-bang-list">
-                  {customBangs.map((row) => {
-                    const rowTrigger = normalizeAlias(row.trigger);
-                    const shadowBookmark = rowTrigger
-                      ? bookmarks.find(
-                          (b) =>
-                            normalizeAlias(b.alias ?? '') === rowTrigger
-                            && Boolean(normalizeSearchUrl(b.searchUrl ?? '')),
-                        )
-                      : undefined;
-                    const jumpShadowBookmark = rowTrigger && !shadowBookmark
-                      ? bookmarks.find(
-                          (b) => normalizeAlias(b.alias ?? '') === rowTrigger,
-                        )
-                      : undefined;
-
-                    return (
-                      <div key={row.id} className="app-bang-item">
-                        <div className="app-bang-row">
-                          <input
-                            aria-label="Trigger"
-                            placeholder="docs"
-                            value={row.trigger}
-                            onChange={(event) =>
-                              updateRow(row.id, 'trigger', event.target.value)}
-                          />
-                          <input
-                            aria-label="Display name"
-                            placeholder="Company Docs"
-                            value={row.label}
-                            onChange={(event) =>
-                              updateRow(row.id, 'label', event.target.value)}
-                          />
-                          <input
-                            aria-label="Search URL"
-                            inputMode="url"
-                            placeholder="https://docs.example.com/search?q=%s"
-                            value={row.searchUrl}
-                            onChange={(event) =>
-                              updateRow(row.id, 'searchUrl', event.target.value)}
-                          />
-                          <button
-                            type="button"
-                            className="app-bang-remove-button"
-                            aria-label={`Remove ${row.trigger || 'custom bang'}`}
-                            onClick={() => removeRow(row.id)}
-                          >
-                            Remove
-                          </button>
-                        </div>
-                        {shadowBookmark && (
-                          <p className="app-bang-shadow-note">
-                            Shadowed by bookmark “{shadowBookmark.title}” (!{rowTrigger} uses its site search URL).
-                          </p>
-                        )}
-                        {jumpShadowBookmark && (
-                          <p className="app-bang-shadow-note">
-                            Note: bare !{rowTrigger} opens bookmark “{jumpShadowBookmark.title}”; !{rowTrigger} &lt;query&gt; uses this !bang.
-                          </p>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="app-form-hint">
-                  No custom !bangs yet. Bookmarks with a shortcut and site search URL also act as !bangs.
-                </p>
               )}
             </div>
 
@@ -429,15 +476,13 @@ export default function SearchSettingsDialog({
               <div className="app-builtin-bangs">
                 {BUILT_IN_BANGS.map((bang) => {
                   const isEnabled = !disabledBuiltInBangs.has(bang.trigger);
-                  const bookmarkSearchOverride = bookmarks.find(
-                    (b) =>
-                      normalizeAlias(b.alias ?? '') === bang.trigger
-                      && Boolean(normalizeSearchUrl(b.searchUrl ?? '')),
-                  );
+                  const bookmarkSearchOverride = findBookmarkShortcut(
+                    bookmarks,
+                    bang.trigger,
+                    true,
+                  )?.bookmark;
                   const bookmarkJumpOverride = !bookmarkSearchOverride
-                    ? bookmarks.find(
-                        (b) => normalizeAlias(b.alias ?? '') === bang.trigger,
-                      )
+                    ? findBookmarkShortcut(bookmarks, bang.trigger, false)?.bookmark
                     : undefined;
                   const customOverride = activeCustomTriggers.has(bang.trigger);
 
@@ -484,6 +529,135 @@ export default function SearchSettingsDialog({
               </div>
             </details>
 
+            <details className="app-form-details" open>
+              <summary>
+                Bookmark !bangs ({totalBookmarkShortcuts})
+              </summary>
+              <p className="app-bang-section-hint app-bookmark-bangs-hint">
+                Right-click any bookmark and choose Edit… to manage its shortcuts.
+              </p>
+              {bookmarkBangEntries.length > 0 ? (
+                <div className="app-bookmark-bangs">
+                  {bookmarkBangEntries.map((entry, entryIndex) => (
+                    <div
+                      key={`${entry.bookmark.url}-${entry.bookmark.section}-${entryIndex}`}
+                      className="app-bookmark-bang-card"
+                    >
+                      <div className="app-bookmark-bang-head">
+                        <strong>{entry.bookmark.title}</strong>
+                        <span>{entry.bookmark.section}</span>
+                      </div>
+                      <ul className="app-bookmark-bang-shortcuts">
+                        {entry.shortcuts.map((shortcut) => (
+                          <li key={shortcut.alias} className="app-bookmark-bang-item">
+                            <code>!{shortcut.alias}</code>
+                            <div className="app-bookmark-bang-detail">
+                              <span className="app-bookmark-bang-target">
+                                {shortcut.targetLabel}
+                              </span>
+                              {shortcut.overrideNote && (
+                                <small className="app-bookmark-bang-note">
+                                  {shortcut.overrideNote}
+                                </small>
+                              )}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="app-form-hint">
+                  No bookmark shortcuts yet. Add shortcuts to any bookmark to jump or query directly from the omnibar.
+                </p>
+              )}
+            </details>
+
+            <div className="app-bang-section">
+              <div className="app-bang-section-header">
+                <div>
+                  <span className="app-bang-section-label">Custom !bangs</span>
+                  <p className="app-bang-section-hint">
+                    Type <code>!trigger query</code> or <code>trigger query</code> in the omnibar.
+                  </p>
+                </div>
+                <button
+                  ref={addBangButtonRef}
+                  type="button"
+                  className="app-bang-add-button"
+                  onClick={addRow}
+                >
+                  + Add !bang
+                </button>
+              </div>
+
+              {customBangs.length > 0 ? (
+                <div className="app-bang-list">
+                  {customBangs.map((row) => {
+                    const rowTrigger = normalizeAlias(row.trigger);
+                    const shadowBookmark = rowTrigger
+                      ? findBookmarkShortcut(bookmarks, rowTrigger, true)?.bookmark
+                      : undefined;
+                    const jumpShadowBookmark = rowTrigger && !shadowBookmark
+                      ? findBookmarkShortcut(bookmarks, rowTrigger, false)?.bookmark
+                      : undefined;
+
+                    return (
+                      <div key={row.id} className="app-bang-item">
+                        <div className="app-bang-row">
+                          <input
+                            aria-label="Trigger"
+                            placeholder="docs"
+                            value={row.trigger}
+                            onChange={(event) =>
+                              updateRow(row.id, 'trigger', event.target.value)}
+                          />
+                          <input
+                            aria-label="Display name"
+                            placeholder="Company Docs"
+                            value={row.label}
+                            onChange={(event) =>
+                              updateRow(row.id, 'label', event.target.value)}
+                          />
+                          <input
+                            aria-label="Query URL"
+                            inputMode="url"
+                            placeholder="https://docs.example.com/search?q=%s"
+                            value={row.searchUrl}
+                            onChange={(event) =>
+                              updateRow(row.id, 'searchUrl', event.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="app-bang-remove-button"
+                            aria-label={`Remove ${row.trigger || 'custom bang'}`}
+                            onClick={() => removeRow(row.id)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                        {shadowBookmark && (
+                          <p className="app-bang-shadow-note">
+                            Shadowed by bookmark “{shadowBookmark.title}” (!{rowTrigger} uses its query URL).
+                          </p>
+                        )}
+                        {jumpShadowBookmark && (
+                          <p className="app-bang-shadow-note">
+                            Note: bare !{rowTrigger} opens bookmark “{jumpShadowBookmark.title}”; !{rowTrigger} &lt;query&gt; uses this !bang.
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="app-form-hint">
+                  No custom !bangs yet. Bookmarks with shortcuts also act as !bangs.
+                </p>
+              )}
+            </div>
+
             {error && (
               <p className="app-form-error" role="alert">
                 {error}
@@ -491,7 +665,21 @@ export default function SearchSettingsDialog({
             )}
           </div>
 
-          <footer>
+          <footer className="app-dialog-footer-split">
+            <div className="app-dialog-footer-tools">
+              <button
+                type="button"
+                onClick={() => settingsFileRef.current?.click()}
+              >
+                Import settings…
+              </button>
+              <button
+                type="button"
+                onClick={handleExportClick}
+              >
+                Export settings
+              </button>
+            </div>
             <button type="submit" className="is-primary">
               Save settings
             </button>

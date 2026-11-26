@@ -1,10 +1,16 @@
 import Fuse from 'fuse.js';
 import { normalizeAlias, normalizeSearchUrl, normalizeUrl, urlIdentity } from './lib.ts';
 
+export interface BookmarkShortcut {
+    alias: string;
+    queryUrl?: string;
+}
+
 export interface Bookmark {
     title: string;
     url: string;
     section: string;
+    shortcuts?: BookmarkShortcut[];
     alias?: string;
     searchUrl?: string;
     subsection?: string;
@@ -17,6 +23,79 @@ export interface Bookmark {
     formats?: string[];
     tier?: string;
     product?: string;
+}
+
+export function getBookmarkShortcuts(bookmark: Bookmark): BookmarkShortcut[] {
+    const result: BookmarkShortcut[] = [];
+    const seenAliases = new Set<string>();
+
+    if (Array.isArray(bookmark.shortcuts)) {
+        for (const entry of bookmark.shortcuts) {
+            if (!entry || typeof entry !== 'object') continue;
+            const rawAlias = typeof entry.alias === 'string' ? entry.alias : '';
+            const alias = normalizeAlias(rawAlias);
+            if (!alias || seenAliases.has(alias)) continue;
+
+            const rawQuery = entry.queryUrl !== undefined
+                ? entry.queryUrl
+                : (entry as unknown as Record<string, unknown>).searchUrl;
+            const queryUrl = typeof rawQuery === 'string' ? normalizeSearchUrl(rawQuery) : '';
+            seenAliases.add(alias);
+            result.push(queryUrl ? { alias, queryUrl } : { alias });
+        }
+    }
+
+    const legacyAlias = normalizeAlias(typeof bookmark.alias === 'string' ? bookmark.alias : '');
+    if (legacyAlias && !seenAliases.has(legacyAlias)) {
+        const legacyQuery = typeof bookmark.searchUrl === 'string'
+            ? normalizeSearchUrl(bookmark.searchUrl)
+            : '';
+        seenAliases.add(legacyAlias);
+        result.push(legacyQuery ? { alias: legacyAlias, queryUrl: legacyQuery } : { alias: legacyAlias });
+    }
+
+    return result;
+}
+
+export function formatBookmarkShortcutBadges(bookmark: Bookmark): {
+    visible: string[];
+    overflowCount: number;
+} {
+    const shortcuts = getBookmarkShortcuts(bookmark);
+    if (shortcuts.length === 0) {
+        return { visible: [], overflowCount: 0 };
+    }
+    if (shortcuts.length <= 2) {
+        return {
+            visible: shortcuts.map((shortcut) => shortcut.alias),
+            overflowCount: 0,
+        };
+    }
+    return {
+        visible: [shortcuts[0].alias, shortcuts[1].alias],
+        overflowCount: shortcuts.length - 2,
+    };
+}
+
+export function findBookmarkShortcut(
+    bookmarks: readonly Bookmark[],
+    trigger: string,
+    requireQueryUrl = false,
+): { bookmark: Bookmark; shortcut: BookmarkShortcut } | undefined {
+    const normalized = normalizeAlias(trigger);
+    if (!normalized) return undefined;
+
+    for (const bookmark of bookmarks) {
+        for (const shortcut of getBookmarkShortcuts(bookmark)) {
+            if (
+                shortcut.alias === normalized
+                && (!requireQueryUrl || Boolean(shortcut.queryUrl))
+            ) {
+                return { bookmark, shortcut };
+            }
+        }
+    }
+    return undefined;
 }
 
 const optionalStrings = [
@@ -36,7 +115,11 @@ const optionalStringArrays = [
 ] as const;
 
 const searchKeys = [
-    { name: 'alias', weight: 3 },
+    {
+        name: 'alias',
+        weight: 3,
+        getFn: (bookmark: Bookmark) => getBookmarkShortcuts(bookmark).map((s) => s.alias),
+    },
     { name: 'title', weight: 2 },
     { name: 'section', weight: 1.5 },
     { name: 'categories', weight: 1.5 },
@@ -92,7 +175,7 @@ export function parseBookmarks(content: string): Bookmark[] {
     const value: unknown = JSON.parse(content);
     if (!Array.isArray(value)) throw new Error('Expected a JSON array of bookmarks.');
 
-    const seenAliases = new Map<string, { index: number; title: string }>();
+    const seenAliases = new Map<string, { index: number; title: string; shortcutNum?: number }>();
 
     return value.map((item: unknown, index) => {
         const bookmarkNum = index + 1;
@@ -128,81 +211,169 @@ export function parseBookmarks(content: string): Bookmark[] {
             throw new Error(`Bookmark ${bookmarkNum}.iconUrl must be a valid HTTP(S) URL.`);
         }
 
-        let needsClone = false;
-        let resolvedAlias: string | undefined;
-        let hasAliasKey = false;
+        const bookmarkTitle = (record.title as string).trim();
+        const intraSeen = new Set<string>();
+        const finalShortcuts: BookmarkShortcut[] = [];
+        let hasShortcutFields = false;
 
+        if (record.shortcuts !== undefined) {
+            hasShortcutFields = true;
+            if (!Array.isArray(record.shortcuts)) {
+                throw new Error(`Bookmark ${bookmarkNum}.shortcuts must be an array.`);
+            }
+
+            record.shortcuts.forEach((shortcutItem: unknown, sIdx: number) => {
+                const shortcutNum = sIdx + 1;
+                if (
+                    typeof shortcutItem !== 'object'
+                    || shortcutItem === null
+                    || Array.isArray(shortcutItem)
+                ) {
+                    throw new Error(
+                        `Bookmark ${bookmarkNum}.shortcuts[${shortcutNum}] must be an object.`,
+                    );
+                }
+
+                const entry = shortcutItem as Record<string, unknown>;
+                const rawAlias = typeof entry.alias === 'string' ? entry.alias.trim() : '';
+                const normAlias = rawAlias ? normalizeAlias(rawAlias) : '';
+                if (!normAlias) {
+                    throw new Error(
+                        `Bookmark ${bookmarkNum}.shortcuts[${shortcutNum}].alias must be 1-32 lowercase letters, numbers, or hyphens.`,
+                    );
+                }
+                if (intraSeen.has(normAlias)) {
+                    throw new Error(
+                        `Bookmark ${bookmarkNum}.shortcuts[${shortcutNum}].alias duplicates "${normAlias}" in Bookmark ${bookmarkNum}.`,
+                    );
+                }
+                const existing = seenAliases.get(normAlias);
+                if (existing) {
+                    if (existing.shortcutNum !== undefined) {
+                        throw new Error(
+                            `Bookmark ${bookmarkNum}.shortcuts[${shortcutNum}].alias duplicates "${normAlias}" from Bookmark ${existing.index} shortcut ${existing.shortcutNum} (${existing.title}).`,
+                        );
+                    }
+                    throw new Error(
+                        `Bookmark ${bookmarkNum}.shortcuts[${shortcutNum}].alias duplicates "${normAlias}" from Bookmark ${existing.index} (${existing.title}).`,
+                    );
+                }
+
+                const urlKeyName = entry.queryUrl !== undefined ? 'queryUrl' : 'searchUrl';
+                const rawQuery = entry.queryUrl !== undefined ? entry.queryUrl : entry.searchUrl;
+                let normQuery: string | undefined;
+                if (rawQuery !== undefined) {
+                    if (typeof rawQuery !== 'string') {
+                        throw new Error(
+                            `Bookmark ${bookmarkNum}.shortcuts[${shortcutNum}].${urlKeyName} must be a string.`,
+                        );
+                    }
+                    const trimmedQuery = rawQuery.trim();
+                    if (trimmedQuery !== '') {
+                        const normalizedQuery = normalizeSearchUrl(trimmedQuery);
+                        if (!normalizedQuery) {
+                            throw new Error(
+                                `Bookmark ${bookmarkNum}.shortcuts[${shortcutNum}].${urlKeyName} must be a valid HTTP(S) query URL containing %s.`,
+                            );
+                        }
+                        normQuery = normalizedQuery;
+                    }
+                }
+
+                intraSeen.add(normAlias);
+                seenAliases.set(normAlias, {
+                    index: bookmarkNum,
+                    title: bookmarkTitle,
+                    shortcutNum,
+                });
+                finalShortcuts.push(
+                    normQuery ? { alias: normAlias, queryUrl: normQuery } : { alias: normAlias },
+                );
+            });
+        }
+
+        let resolvedLegacyAlias: string | undefined;
         if (record.alias !== undefined) {
-            hasAliasKey = true;
+            hasShortcutFields = true;
             if (typeof record.alias !== 'string') {
                 throw new Error(`Bookmark ${bookmarkNum}.alias must be a string.`);
             }
             const trimmedAlias = record.alias.trim();
-            if (trimmedAlias === '') {
-                needsClone = true;
-                resolvedAlias = undefined;
-            } else {
+            if (trimmedAlias !== '') {
                 const normalizedAlias = normalizeAlias(trimmedAlias);
                 if (!normalizedAlias) {
                     throw new Error(
                         `Bookmark ${bookmarkNum}.alias must be 1-32 lowercase letters, numbers, or hyphens.`,
                     );
                 }
+                if (intraSeen.has(normalizedAlias)) {
+                    throw new Error(
+                        `Bookmark ${bookmarkNum}.alias duplicates "${normalizedAlias}" in Bookmark ${bookmarkNum}.`,
+                    );
+                }
                 const existing = seenAliases.get(normalizedAlias);
                 if (existing) {
+                    if (existing.shortcutNum !== undefined) {
+                        throw new Error(
+                            `Bookmark ${bookmarkNum}.alias duplicates "${normalizedAlias}" from Bookmark ${existing.index} shortcut ${existing.shortcutNum} (${existing.title}).`,
+                        );
+                    }
                     throw new Error(
                         `Bookmark ${bookmarkNum}.alias duplicates "${normalizedAlias}" from Bookmark ${existing.index} (${existing.title}).`,
                     );
                 }
+                intraSeen.add(normalizedAlias);
                 seenAliases.set(normalizedAlias, {
                     index: bookmarkNum,
-                    title: (record.title as string).trim(),
+                    title: bookmarkTitle,
                 });
-                resolvedAlias = normalizedAlias;
-                if (record.alias !== normalizedAlias) {
-                    needsClone = true;
-                }
+                resolvedLegacyAlias = normalizedAlias;
             }
         }
 
-        let resolvedSearchUrl: string | undefined;
-        let hasSearchUrlKey = false;
-
+        let resolvedLegacySearchUrl: string | undefined;
         if (record.searchUrl !== undefined) {
-            hasSearchUrlKey = true;
+            hasShortcutFields = true;
             if (typeof record.searchUrl !== 'string') {
                 throw new Error(`Bookmark ${bookmarkNum}.searchUrl must be a string.`);
             }
             const trimmedSearchUrl = record.searchUrl.trim();
-            if (trimmedSearchUrl === '') {
-                needsClone = true;
-                resolvedSearchUrl = undefined;
-            } else {
+            if (trimmedSearchUrl !== '') {
                 const normalizedSearchUrl = normalizeSearchUrl(trimmedSearchUrl);
                 if (!normalizedSearchUrl) {
                     throw new Error(
                         `Bookmark ${bookmarkNum}.searchUrl must be a valid HTTP(S) search URL containing %s.`,
                     );
                 }
-                resolvedSearchUrl = normalizedSearchUrl;
-                if (record.searchUrl !== normalizedSearchUrl) {
-                    needsClone = true;
-                }
+                resolvedLegacySearchUrl = normalizedSearchUrl;
             }
         }
 
-        if (!needsClone) {
+        if (resolvedLegacyAlias !== undefined) {
+            finalShortcuts.push(
+                resolvedLegacySearchUrl !== undefined
+                    ? { alias: resolvedLegacyAlias, queryUrl: resolvedLegacySearchUrl }
+                    : { alias: resolvedLegacyAlias },
+            );
+        }
+
+        if (!hasShortcutFields) {
             return record as unknown as Bookmark;
         }
 
         const copy = { ...(record as unknown as Bookmark) };
-        if (hasAliasKey) {
-            if (resolvedAlias !== undefined) copy.alias = resolvedAlias;
-            else delete copy.alias;
-        }
-        if (hasSearchUrlKey) {
-            if (resolvedSearchUrl !== undefined) copy.searchUrl = resolvedSearchUrl;
-            else delete copy.searchUrl;
+        if (finalShortcuts.length > 0) {
+            copy.shortcuts = finalShortcuts;
+            delete copy.alias;
+            delete copy.searchUrl;
+        } else {
+            delete copy.shortcuts;
+            delete copy.alias;
+            if (record.shortcuts === undefined && resolvedLegacySearchUrl !== undefined) {
+                copy.searchUrl = resolvedLegacySearchUrl;
+            } else {
+                delete copy.searchUrl;
+            }
         }
         return copy;
     });
@@ -253,11 +424,17 @@ export function searchBookmarks(bookmarks: Bookmark[], query: string): Bookmark[
 
     if (normalizedWholeAlias || aliasPrefix) {
         bookmarks.forEach((bookmark) => {
-            const bAlias = normalizeAlias(bookmark.alias ?? '');
-            if (!bAlias) return;
-            if (normalizedWholeAlias && bAlias === normalizedWholeAlias) {
+            const shortcuts = getBookmarkShortcuts(bookmark);
+            if (shortcuts.length === 0) return;
+            if (
+                normalizedWholeAlias
+                && shortcuts.some((shortcut) => shortcut.alias === normalizedWholeAlias)
+            ) {
                 scores.set(bookmark, -2);
-            } else if (aliasPrefix && bAlias.startsWith(aliasPrefix)) {
+            } else if (
+                aliasPrefix
+                && shortcuts.some((shortcut) => shortcut.alias.startsWith(aliasPrefix))
+            ) {
                 scores.set(bookmark, Math.min(scores.get(bookmark) ?? 0, -1));
             }
         });
@@ -314,7 +491,7 @@ export function findMatchingBookmarkIndex(
     const targetSectionLower = targetSection.toLocaleLowerCase();
     const targetTitle = target.title.trim();
     const targetSubsection = (target.subsection ?? '').trim();
-    const targetAlias = normalizeAlias(target.alias ?? '');
+    const targetShortcuts = getBookmarkShortcuts(target).map((s) => s.alias).join(',');
 
     let fullMatchIdx = -1;
     let exactSectionTitleIdx = -1;
@@ -341,7 +518,7 @@ export function findMatchingBookmarkIndex(
             if (
                 fullMatchIdx < 0
                 && (item.subsection ?? '').trim() === targetSubsection
-                && normalizeAlias(item.alias ?? '') === targetAlias
+                && getBookmarkShortcuts(item).map((s) => s.alias).join(',') === targetShortcuts
             ) {
                 fullMatchIdx = index;
             }
@@ -374,7 +551,7 @@ export function findMatchingBookmark(
 }
 
 export type SaveBookmarkResult =
-    | { ok: true; bookmarks: Bookmark[] }
+    | { ok: true; bookmarks: Bookmark[]; bookmark: Bookmark }
     | { ok: false; error: string };
 
 export function applyBookmarkSave(
@@ -407,38 +584,160 @@ export function applyBookmarkSave(
         }
     }
 
-    const nextAlias = normalizeAlias(nextBookmark.alias ?? '');
-    if (nextAlias) {
-        const duplicateAlias = bookmarks.find(
-            (bookmark, index) =>
-                index !== editingIndex
-                && normalizeAlias(bookmark.alias ?? '') === nextAlias,
-        );
-        if (duplicateAlias) {
+    const validatedShortcuts: BookmarkShortcut[] = [];
+    const intraSeen = new Set<string>();
+
+    if (nextBookmark.shortcuts !== undefined) {
+        if (!Array.isArray(nextBookmark.shortcuts)) {
+            return { ok: false, error: 'Shortcuts must be a list.' };
+        }
+        for (const entry of nextBookmark.shortcuts) {
+            if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+                return { ok: false, error: 'Each shortcut must be a valid entry.' };
+            }
+            const rawEntry = entry as unknown as Record<string, unknown>;
+            if (rawEntry.alias !== undefined && typeof rawEntry.alias !== 'string') {
+                return {
+                    ok: false,
+                    error: 'Shortcut must be 1–32 letters, numbers, or hyphens (e.g. gh or my-docs).',
+                };
+            }
+            const rawQueryVal = rawEntry.queryUrl !== undefined
+                ? rawEntry.queryUrl
+                : rawEntry.searchUrl;
+            if (rawQueryVal !== undefined && typeof rawQueryVal !== 'string') {
+                return {
+                    ok: false,
+                    error: 'Query URL must be a valid http:// or https:// address containing %s.',
+                };
+            }
+            const rawAlias = typeof rawEntry.alias === 'string' ? rawEntry.alias.trim() : '';
+            const rawQuery = typeof rawQueryVal === 'string' ? rawQueryVal.trim() : '';
+            if (!rawAlias && !rawQuery) continue;
+            if (!rawAlias && rawQuery) {
+                return { ok: false, error: 'Add a shortcut (!bang) to use a query URL.' };
+            }
+            const normAlias = normalizeAlias(rawAlias);
+            if (!normAlias) {
+                return {
+                    ok: false,
+                    error: 'Shortcut must be 1–32 letters, numbers, or hyphens (e.g. gh or my-docs).',
+                };
+            }
+            if (intraSeen.has(normAlias)) {
+                return {
+                    ok: false,
+                    error: `Duplicate shortcut “!${normAlias}” on this bookmark.`,
+                };
+            }
+            let normQuery = '';
+            if (rawQuery) {
+                normQuery = normalizeSearchUrl(rawQuery);
+                if (!normQuery) {
+                    return {
+                        ok: false,
+                        error: 'Query URL must be a valid http:// or https:// address containing %s.',
+                    };
+                }
+            }
+            intraSeen.add(normAlias);
+            validatedShortcuts.push(
+                normQuery ? { alias: normAlias, queryUrl: normQuery } : { alias: normAlias },
+            );
+        }
+    }
+
+    if (nextBookmark.alias !== undefined && typeof nextBookmark.alias !== 'string') {
+        return {
+            ok: false,
+            error: 'Shortcut must be 1–32 letters, numbers, or hyphens (e.g. gh or my-docs).',
+        };
+    }
+    if (nextBookmark.searchUrl !== undefined && typeof nextBookmark.searchUrl !== 'string') {
+        return {
+            ok: false,
+            error: 'Query URL must be a valid http:// or https:// address containing %s.',
+        };
+    }
+    const rawLegacyAlias = typeof nextBookmark.alias === 'string' ? nextBookmark.alias.trim() : '';
+    const rawLegacySearch = typeof nextBookmark.searchUrl === 'string'
+        ? nextBookmark.searchUrl.trim()
+        : '';
+    if (rawLegacyAlias || rawLegacySearch) {
+        if (!rawLegacyAlias && rawLegacySearch) {
+            return { ok: false, error: 'Add a shortcut (!bang) to use a query URL.' };
+        }
+        const normLegacyAlias = normalizeAlias(rawLegacyAlias);
+        if (!normLegacyAlias) {
             return {
                 ok: false,
-                error: `“${duplicateAlias.title}” already uses shortcut !${nextAlias}.`,
+                error: 'Shortcut must be 1–32 letters, numbers, or hyphens (e.g. gh or my-docs).',
+            };
+        }
+        if (intraSeen.has(normLegacyAlias)) {
+            return {
+                ok: false,
+                error: `Duplicate shortcut “!${normLegacyAlias}” on this bookmark.`,
+            };
+        }
+        let normLegacyQuery = '';
+        if (rawLegacySearch) {
+            normLegacyQuery = normalizeSearchUrl(rawLegacySearch);
+            if (!normLegacyQuery) {
+                return {
+                    ok: false,
+                    error: 'Query URL must be a valid http:// or https:// address containing %s.',
+                };
+            }
+        }
+        intraSeen.add(normLegacyAlias);
+        validatedShortcuts.push(
+            normLegacyQuery
+                ? { alias: normLegacyAlias, queryUrl: normLegacyQuery }
+                : { alias: normLegacyAlias },
+        );
+    }
+
+    for (const sc of validatedShortcuts) {
+        const duplicateOwner = bookmarks.find(
+            (other, idx) =>
+                idx !== editingIndex
+                && getBookmarkShortcuts(other).some((otherSc) => otherSc.alias === sc.alias),
+        );
+        if (duplicateOwner) {
+            return {
+                ok: false,
+                error: `“${duplicateOwner.title}” already uses shortcut !${sc.alias}.`,
             };
         }
     }
 
+    const savedBookmark: Bookmark = { ...nextBookmark };
+    delete savedBookmark.alias;
+    delete savedBookmark.searchUrl;
+    if (validatedShortcuts.length > 0) {
+        savedBookmark.shortcuts = validatedShortcuts;
+    } else {
+        delete savedBookmark.shortcuts;
+    }
+
     let nextBookmarks: Bookmark[];
     if (resolvedEditing) {
-        if (nextBookmark.section === resolvedEditing.section) {
+        if (savedBookmark.section === resolvedEditing.section) {
             nextBookmarks = bookmarks.map((bookmark, index) =>
-                index === editingIndex ? nextBookmark : bookmark,
+                index === editingIndex ? savedBookmark : bookmark,
             );
         } else {
             const remaining = bookmarks.filter(
                 (_bookmark, index) => index !== editingIndex,
             );
-            nextBookmarks = insertBookmarkInSection(remaining, nextBookmark);
+            nextBookmarks = insertBookmarkInSection(remaining, savedBookmark);
         }
     } else {
-        nextBookmarks = insertBookmarkInSection(bookmarks, nextBookmark);
+        nextBookmarks = insertBookmarkInSection(bookmarks, savedBookmark);
     }
 
-    return { ok: true, bookmarks: nextBookmarks };
+    return { ok: true, bookmarks: nextBookmarks, bookmark: savedBookmark };
 }
 
 export function moveBookmarkToSection(

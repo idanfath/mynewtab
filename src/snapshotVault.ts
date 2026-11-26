@@ -2,8 +2,10 @@ import {
   BACKUP_KEY,
   STORAGE_KEY,
   classifyStoredDataFailure,
+  getBookmarkShortcuts,
   parseBookmarks,
   type Bookmark,
+  type BookmarkShortcut,
   type StoredDataFailure,
 } from './bookmarks.ts';
 import {
@@ -221,21 +223,78 @@ function validateSnapshotBookmark(item: unknown): Bookmark | null {
   if (typeof record.iconUrl === 'string' && record.iconUrl.trim() && !normalizeUrl(record.iconUrl)) {
     return null;
   }
+
+  const intraSeen = new Set<string>();
+  const finalShortcuts: BookmarkShortcut[] = [];
+
+  if (record.shortcuts !== undefined) {
+    if (!Array.isArray(record.shortcuts)) {
+      return null;
+    }
+    for (const shortcutItem of record.shortcuts) {
+      if (
+        typeof shortcutItem !== 'object'
+        || shortcutItem === null
+        || Array.isArray(shortcutItem)
+      ) {
+        return null;
+      }
+      const entry = shortcutItem as Record<string, unknown>;
+      if (typeof entry.alias !== 'string') return null;
+      const trimmedAlias = entry.alias.trim();
+      const normAlias = trimmedAlias ? normalizeAlias(trimmedAlias) : '';
+      if (!normAlias || intraSeen.has(normAlias)) return null;
+
+      const rawQuery = entry.queryUrl !== undefined ? entry.queryUrl : entry.searchUrl;
+      let normQuery: string | undefined;
+      if (rawQuery !== undefined) {
+        if (typeof rawQuery !== 'string') return null;
+        const trimmedQuery = rawQuery.trim();
+        if (trimmedQuery) {
+          const normalizedQuery = normalizeSearchUrl(trimmedQuery);
+          if (!normalizedQuery) return null;
+          normQuery = normalizedQuery;
+        }
+      }
+
+      intraSeen.add(normAlias);
+      finalShortcuts.push(
+        normQuery ? { alias: normAlias, queryUrl: normQuery } : { alias: normAlias },
+      );
+    }
+  }
+
   if (record.alias !== undefined && typeof record.alias !== 'string') {
     return null;
   }
-  if (typeof record.alias === 'string' && record.alias.trim() && !normalizeAlias(record.alias)) {
-    return null;
+  let resolvedLegacyAlias: string | undefined;
+  if (typeof record.alias === 'string' && record.alias.trim()) {
+    const normLegacy = normalizeAlias(record.alias);
+    if (!normLegacy || intraSeen.has(normLegacy)) {
+      return null;
+    }
+    intraSeen.add(normLegacy);
+    resolvedLegacyAlias = normLegacy;
   }
+
   if (record.searchUrl !== undefined && typeof record.searchUrl !== 'string') {
     return null;
   }
-  if (
-    typeof record.searchUrl === 'string'
-    && record.searchUrl.trim()
-    && !normalizeSearchUrl(record.searchUrl)
-  ) {
-    return null;
+  let resolvedLegacySearch: string | undefined;
+  if (typeof record.searchUrl === 'string' && record.searchUrl.trim()) {
+    const normSearch = normalizeSearchUrl(record.searchUrl);
+    if (!normSearch) {
+      return null;
+    }
+    resolvedLegacySearch = normSearch;
+  }
+
+  if (resolvedLegacyAlias !== undefined) {
+    finalShortcuts.push(
+      resolvedLegacySearch !== undefined
+        ? { alias: resolvedLegacyAlias, queryUrl: resolvedLegacySearch }
+        : { alias: resolvedLegacyAlias },
+    );
   }
 
   const rawSection = (record.section as string).trim();
@@ -250,16 +309,13 @@ function validateSnapshotBookmark(item: unknown): Bookmark | null {
     section: sanitizedSection,
   };
 
-  if (typeof record.alias === 'string' && record.alias.trim()) {
-    out.alias = normalizeAlias(record.alias);
-  } else {
-    delete out.alias;
-  }
-
-  if (typeof record.searchUrl === 'string' && record.searchUrl.trim()) {
-    out.searchUrl = normalizeSearchUrl(record.searchUrl);
-  } else {
-    delete out.searchUrl;
+  delete out.alias;
+  delete out.searchUrl;
+  delete out.shortcuts;
+  if (finalShortcuts.length > 0) {
+    out.shortcuts = finalShortcuts;
+  } else if (record.shortcuts === undefined && resolvedLegacySearch !== undefined) {
+    out.searchUrl = resolvedLegacySearch;
   }
 
   for (const field of OPTIONAL_SCALARS) {
@@ -349,13 +405,15 @@ export function loadSnapshots(storage: Pick<Storage, 'getItem'>): BookmarkSnapsh
         entryValid = false;
         break;
       }
-      if (validated.alias) {
-        if (seenAliases.has(validated.alias)) {
+      const validatedShortcuts = getBookmarkShortcuts(validated);
+      for (const shortcut of validatedShortcuts) {
+        if (seenAliases.has(shortcut.alias)) {
           entryValid = false;
           break;
         }
-        seenAliases.add(validated.alias);
+        seenAliases.add(shortcut.alias);
       }
+      if (!entryValid) break;
       validBookmarks.push(validated);
     }
     if (!entryValid) continue;

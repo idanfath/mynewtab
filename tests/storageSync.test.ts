@@ -59,7 +59,8 @@ test('background sync converges bookmarks, reconciles view, and preserves unknow
   assert.equal(transition.section, 'All'); // 'Media' was removed
   assert.equal(transition.activeBookmark?.title, 'Alpha'); // matched by urlIdentity
   assert.equal(transition.bookmarks[0].section, 'Uncategorized'); // 'All' normalized
-  assert.equal((transition.bookmarks[0] as unknown as Record<string, unknown>).alias, 'al');
+  assert.deepEqual(transition.bookmarks[0].shortcuts, [{ alias: 'al' }]);
+  assert.equal((transition.bookmarks[0] as unknown as Record<string, unknown>).alias, undefined);
 
   // Invalid external JSON does not wipe valid in-memory bookmarks
   const invalid = evaluateExternalBookmarkChange({

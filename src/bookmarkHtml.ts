@@ -1,9 +1,10 @@
 import {
+  getBookmarkShortcuts,
   groupBookmarksBySection,
   parseBookmarks,
   type Bookmark,
 } from './bookmarks.ts';
-import { normalizeAlias, normalizeSearchUrl, normalizeUrl } from './lib.ts';
+import { normalizeSearchUrl, normalizeUrl } from './lib.ts';
 import { cloneWithoutProto, deduplicateBookmarks } from './bookmarkMerge.ts';
 
 export type BookmarkFileFormat = 'json' | 'html';
@@ -713,28 +714,20 @@ function sanitizeJsonBookmark(
     delete record.iconUrl;
   }
 
-  const rawAlias = bookmark.alias?.trim();
-  if (rawAlias) {
-    const normalizedAlias = normalizeAlias(rawAlias);
-    if (normalizedAlias) {
-      record.alias = normalizedAlias;
-    } else {
-      delete record.alias;
+  const shortcuts = getBookmarkShortcuts(bookmark);
+  delete record.alias;
+  delete record.searchUrl;
+  delete record.shortcuts;
+  if (shortcuts.length > 0) {
+    record.shortcuts = shortcuts;
+  } else if (bookmark.shortcuts === undefined) {
+    const rawSearch = bookmark.searchUrl?.trim();
+    if (rawSearch) {
+      const normalizedSearch = normalizeSearchUrl(rawSearch);
+      if (normalizedSearch) {
+        record.searchUrl = normalizedSearch;
+      }
     }
-  } else {
-    delete record.alias;
-  }
-
-  const rawSearch = bookmark.searchUrl?.trim();
-  if (rawSearch) {
-    const normalizedSearch = normalizeSearchUrl(rawSearch);
-    if (normalizedSearch) {
-      record.searchUrl = normalizedSearch;
-    } else {
-      delete record.searchUrl;
-    }
-  } else {
-    delete record.searchUrl;
   }
 
   for (const field of OPTIONAL_ARRAY_FIELDS) {

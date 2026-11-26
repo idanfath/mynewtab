@@ -13,17 +13,27 @@ import {
   safeHostname,
 } from '../src/lib.ts';
 import {
+  formatBookmarkShortcutBadges,
+  getBookmarkShortcuts,
   parseBookmarks,
   searchBookmarks,
   type Bookmark,
 } from '../src/bookmarks.ts';
 import {
+  applyBookmarkMerge,
+  areBookmarksEqual,
+  computeBookmarksHash,
+  deduplicateBookmarks,
+} from '../src/bookmarkMerge.ts';
+import {
   findBookmarkLine,
+  findShortcutLine,
   formatBookmarkError,
 } from '../src/formatBookmarkError.ts';
 import {
   DEFAULT_OMNIBAR_SETTINGS,
   buildWebSearchUrl,
+  collectBookmarkBangEntries,
   detectDirectUrl,
   getActiveSearchEngine,
   parseOmnibarSettings,
@@ -32,6 +42,8 @@ import {
   resolveTabCompletion,
   type OmnibarSettings,
 } from '../src/omnibar.ts';
+import { SNAPSHOTS_KEY, loadSnapshots } from '../src/snapshotVault.ts';
+import { evaluateExternalBookmarkChange } from '../src/storageSync.ts';
 
 test('searchUrl templates preserve literal %20/%25, hash routes, multiple %s, IPv6, and sentinel collisions', () => {
   // Literal %25 and %20 in template must remain intact after normalization + substitution
@@ -207,8 +219,12 @@ test('round-trips complex bookmarks.json and locates errors with escaped keys, n
   const firstPass = parseBookmarks(JSON.stringify(input));
   const secondPass = parseBookmarks(JSON.stringify(firstPass, null, 2));
   assert.deepEqual(secondPass, firstPass);
-  assert.equal(firstPass[0].alias, 'gh-work');
-  assert.equal(firstPass[1].searchUrl, 'http://[::1]:8080/q?s=%s');
+  assert.deepEqual(firstPass[0].shortcuts, [
+    { alias: 'gh-work', queryUrl: 'https://github.com/search?type=code&q=%s&pct=100%25' },
+  ]);
+  assert.deepEqual(firstPass[1].shortcuts, [
+    { alias: 'v6', queryUrl: 'http://[::1]:8080/q?s=%s' },
+  ]);
 
   // CRLF, escaped key name (\u0061lias), nested array before error field, parentheses in title
   const crlfDup = [
@@ -369,4 +385,488 @@ test('embedded ASCII control chars do not bypass scheme checks or emit mangled U
   assert.equal(normalizeUrl('java\tscript://alert(1)'), '');
   assert.equal(normalizeUrl('file\n:///etc/passwd'), '');
   assert.equal(normalizeSearchUrl('http\t://example.com/search?q=%s'), '');
+});
+
+test('multi-shortcut badges and unnormalized fixtures handle 0/1/2/3/5 shortcuts and legacy mixes', () => {
+  const make = (shortcuts?: Bookmark['shortcuts'], alias?: string, searchUrl?: string): Bookmark => ({
+    title: 'Sample',
+    url: 'https://sample.example/',
+    section: 'Dev',
+    ...(shortcuts !== undefined ? { shortcuts } : {}),
+    ...(alias !== undefined ? { alias } : {}),
+    ...(searchUrl !== undefined ? { searchUrl } : {}),
+  });
+
+  assert.deepEqual(formatBookmarkShortcutBadges(make()), { visible: [], overflowCount: 0 });
+  assert.deepEqual(formatBookmarkShortcutBadges(make([])), { visible: [], overflowCount: 0 });
+  assert.deepEqual(formatBookmarkShortcutBadges(make([{ alias: 'one' }])), {
+    visible: ['one'],
+    overflowCount: 0,
+  });
+  assert.deepEqual(
+    formatBookmarkShortcutBadges(make([{ alias: 'one' }, { alias: 'two' }])),
+    { visible: ['one', 'two'], overflowCount: 0 },
+  );
+  assert.deepEqual(
+    formatBookmarkShortcutBadges(make([{ alias: 's1' }, { alias: 's2' }, { alias: 's3' }])),
+    { visible: ['s1', 's2'], overflowCount: 1 },
+  );
+  assert.deepEqual(
+    formatBookmarkShortcutBadges(
+      make([{ alias: 's1' }, { alias: 's2' }, { alias: 's3' }, { alias: 's4' }, { alias: 's5' }]),
+    ),
+    { visible: ['s1', 's2'], overflowCount: 3 },
+  );
+
+  // Unnormalized in-memory fixture mixing shortcuts[], legacy alias/searchUrl, duplicates, and invalid entries
+  const mixed = {
+    title: 'Mixed',
+    url: 'https://mixed.example/',
+    section: 'Dev',
+    shortcuts: [
+      { alias: '!GH', queryUrl: 'github.com/search?q=%s' },
+      { alias: 'gh', queryUrl: 'https://ignored-dup.example/?q=%s' },
+      { alias: 'bad alias!', queryUrl: 'https://bad.example/?q=%s' },
+      { alias: 'ghr', queryUrl: 'not-a-valid-template' },
+      { alias: 'ghi', searchUrl: 'github.com/issues?q=%s' },
+    ],
+    alias: '!GH-LEGACY',
+    searchUrl: 'github.com/pulls?q=%s',
+  } as unknown as Bookmark;
+
+  assert.deepEqual(getBookmarkShortcuts(mixed), [
+    { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+    { alias: 'ghr' },
+    { alias: 'ghi', queryUrl: 'https://github.com/issues?q=%s' },
+    { alias: 'gh-legacy', queryUrl: 'https://github.com/pulls?q=%s' },
+  ]);
+  assert.deepEqual(formatBookmarkShortcutBadges(mixed), {
+    visible: ['gh', 'ghr'],
+    overflowCount: 2,
+  });
+
+  // Duplicate legacy alias already in shortcuts[] does not inflate badge count
+  const dupLegacy = make([{ alias: 'gh' }, { alias: 'ghr' }], '!GH', 'github.com/search?q=%s');
+  assert.deepEqual(formatBookmarkShortcutBadges(dupLegacy), {
+    visible: ['gh', 'ghr'],
+    overflowCount: 0,
+  });
+});
+
+test('multi-shortcut query substitution handles Unicode/CJK/RTL, %25/%20, multiple %s, hash routes, and JS replace tokens', () => {
+  const bookmarks = parseBookmarks(JSON.stringify([
+    {
+      title: 'Prompt Hub',
+      url: 'https://chat.example/',
+      section: 'AI',
+      shortcuts: [
+        { alias: 'chat' },
+        {
+          alias: 'prompt',
+          queryUrl: 'https://chat.example/#/prompt?q=%s&echo=%s&pct=100%25&sp=a%20b',
+        },
+        {
+          alias: 'pathq',
+          queryUrl: 'https://chat.example/find/%s/details',
+        },
+      ],
+    },
+  ]));
+
+  const trickyQuery = "🚀 日本語 مرحبا $& $' $` $$";
+  const expectedEncoded = encodeSearchQuery(trickyQuery);
+  assert.ok(!expectedEncoded.includes('$'));
+
+  const hashRes = resolveOmnibar(`!prompt ${trickyQuery}`, bookmarks, DEFAULT_OMNIBAR_SETTINGS, []);
+  assert.equal(hashRes?.kind, 'bang-search');
+  assert.equal(
+    hashRes?.url,
+    `https://chat.example/#/prompt?q=${expectedEncoded}&echo=${expectedEncoded}&pct=100%25&sp=a%20b`,
+  );
+
+  // Bare Level 2 prefix also works on 2nd shortcut with JS replace tokens
+  const bareRes = resolveOmnibar("prompt $& $' $` $$", bookmarks, DEFAULT_OMNIBAR_SETTINGS, []);
+  assert.equal(bareRes?.kind, 'bang-search');
+  const encodedDollars = encodeSearchQuery("$& $' $` $$");
+  assert.equal(
+    bareRes?.url,
+    `https://chat.example/#/prompt?q=${encodedDollars}&echo=${encodedDollars}&pct=100%25&sp=a%20b`,
+  );
+
+  // Lone UTF-16 surrogates and dot-segment path queries remain safe
+  assert.equal(encodeSearchQuery('\uD800ok\uDC00'), '%EF%BF%BDok%EF%BF%BD');
+  const dotRes = resolveOmnibar('!pathq ..', bookmarks, DEFAULT_OMNIBAR_SETTINGS, []);
+  assert.equal(dotRes?.url, 'https://chat.example/find/%2E%2E/details');
+});
+
+test('3-tier !bang precedence, split jump/custom behavior, disabled built-in notes, and Level 4 3rd-shortcut rescue', () => {
+  const bookmarks = parseBookmarks(JSON.stringify([
+    {
+      title: 'My AI Workspace',
+      url: 'https://ai.example/',
+      section: 'AI',
+      shortcuts: [
+        { alias: 'ai' },
+        { alias: 'ppx', queryUrl: 'https://ai.example/ask?q=%s' },
+        { alias: 'third-q', queryUrl: 'https://ai.example/third?q=%s' },
+      ],
+    },
+    {
+      title: 'Internal Docs',
+      url: 'https://docs.example/',
+      section: 'Work',
+      shortcuts: [
+        { alias: 'docs' },
+        { alias: 'gh' },
+        { alias: 'third-jump' },
+      ],
+    },
+  ]));
+
+  const settings: OmnibarSettings = {
+    version: 1,
+    defaultEngine: 'duckduckgo',
+    disabledBuiltInBangs: ['gh'],
+    customBangs: [
+      {
+        trigger: 'ppx',
+        label: 'Custom Perplexity',
+        searchUrl: 'https://custom-ppx.example/?q=%s',
+      },
+      {
+        trigger: 'docs',
+        label: 'Company Docs Search',
+        homeUrl: 'https://custom-docs.example/home',
+        searchUrl: 'https://custom-docs.example/find?q=%s',
+      },
+    ],
+  };
+
+  // Level 1A: bare '!' lists bookmark shortcuts first
+  const bareBang = resolveOmnibar('!', bookmarks, settings, []);
+  assert.equal(bareBang?.kind, 'bang-incomplete');
+  assert.equal(bareBang?.tabCompletion, '!ai ');
+
+  // 2nd shortcut (!ppx) with queryUrl overrides BOTH custom !ppx and built-in !ppx
+  const ppxJump = resolveOmnibar('!ppx', bookmarks, settings, []);
+  assert.equal(ppxJump?.kind, 'bang-jump');
+  assert.equal(ppxJump?.url, 'https://ai.example/');
+  assert.equal(ppxJump?.tabCompletion, '!ppx ');
+
+  const ppxReady = resolveOmnibar('!ppx ', bookmarks, settings, []);
+  assert.equal(ppxReady?.kind, 'bang-jump');
+  assert.equal(ppxReady?.title, 'Search My AI Workspace…');
+  assert.equal(ppxReady?.url, 'https://ai.example/');
+
+  const ppxSearch = resolveOmnibar('!ppx rust', bookmarks, settings, []);
+  assert.equal(ppxSearch?.kind, 'bang-search');
+  assert.equal(ppxSearch?.url, 'https://ai.example/ask?q=rust');
+
+  const ppxBareLevel2 = resolveOmnibar('ppx rust', bookmarks, settings, []);
+  assert.equal(ppxBareLevel2?.kind, 'bang-search');
+  assert.equal(ppxBareLevel2?.url, 'https://ai.example/ask?q=rust');
+
+  // Jump-only bookmark (!docs) + active custom !docs: split jump vs search behavior
+  const docsBare = resolveOmnibar('!docs', bookmarks, settings, []);
+  assert.equal(docsBare?.kind, 'bang-jump');
+  assert.equal(docsBare?.url, 'https://docs.example/');
+  assert.equal(docsBare?.title, 'Open Internal Docs');
+  assert.equal(docsBare?.tabCompletion, '!docs ');
+
+  const docsTrailing = resolveOmnibar('!docs ', bookmarks, settings, []);
+  assert.equal(docsTrailing?.kind, 'bang-jump');
+  assert.equal(docsTrailing?.title, 'Search Company Docs Search…');
+  assert.equal(docsTrailing?.url, 'https://docs.example/');
+
+  const docsSearch = resolveOmnibar('!docs api', bookmarks, settings, []);
+  assert.equal(docsSearch?.kind, 'bang-search');
+  assert.equal(docsSearch?.title, 'Search Company Docs Search for “api”');
+  assert.equal(docsSearch?.url, 'https://custom-docs.example/find?q=api');
+
+  // Level 5 fallback when bookmark is in current section with jump-only !docs + custom !docs
+  const level5Docs = resolveOmnibar('docs', bookmarks, settings, [bookmarks[1]]);
+  assert.equal(level5Docs?.kind, 'web-search');
+  assert.equal(level5Docs?.tabCompletion, '!docs ');
+  assert.equal(
+    resolveTabCompletion('docs', { kind: 'bookmark', bookmark: bookmarks[1] }, level5Docs),
+    '!docs ',
+  );
+
+  // Disabled built-in !gh + bookmark !gh -> collectBookmarkBangEntries does NOT falsely claim override
+  const directory = collectBookmarkBangEntries(
+    bookmarks,
+    new Set(['!PPX', 'docs']),
+    new Set(['!GH']),
+  );
+  const aiEntry = directory.find((entry) => entry.bookmark.title === 'My AI Workspace');
+  const docsEntry = directory.find((entry) => entry.bookmark.title === 'Internal Docs');
+  assert.equal(
+    aiEntry?.shortcuts.find((sc) => sc.alias === 'ppx')?.overrideNote,
+    'Overrides custom !bang',
+  );
+  assert.equal(
+    docsEntry?.shortcuts.find((sc) => sc.alias === 'docs')?.overrideNote,
+    'Bare !docs opens bookmark · !docs <query> uses custom !bang',
+  );
+  assert.equal(
+    docsEntry?.shortcuts.find((sc) => sc.alias === 'gh')?.overrideNote,
+    undefined,
+  );
+
+  // Without disabling !gh, built-in override note IS reported
+  const directoryWithGhEnabled = collectBookmarkBangEntries(
+    bookmarks,
+    new Set(['ppx', 'docs']),
+    new Set(),
+  );
+  assert.equal(
+    directoryWithGhEnabled
+      .find((entry) => entry.bookmark.title === 'Internal Docs')
+      ?.shortcuts.find((sc) => sc.alias === 'gh')?.overrideNote,
+    'Overrides built-in !bang',
+  );
+
+  // Level 4 cross-section rescue on 3rd shortcut: with queryUrl vs without queryUrl
+  const rescueWithQuery = resolveOmnibar('third-q', bookmarks, settings, []);
+  assert.equal(rescueWithQuery?.kind, 'bookmark-alias');
+  assert.equal(rescueWithQuery?.badge, '!third-q');
+  assert.equal(rescueWithQuery?.tabCompletion, '!third-q ');
+  assert.equal(
+    resolveTabCompletion('third-q', { kind: 'omnibar', action: rescueWithQuery! }, rescueWithQuery),
+    '!third-q ',
+  );
+
+  const rescueJumpOnly = resolveOmnibar('third-jump', bookmarks, settings, []);
+  assert.equal(rescueJumpOnly?.kind, 'bookmark-alias');
+  assert.equal(rescueJumpOnly?.badge, '!third-jump');
+  assert.equal(rescueJumpOnly?.tabCompletion, undefined);
+  assert.equal(
+    resolveTabCompletion('third-jump', { kind: 'omnibar', action: rescueJumpOnly! }, rescueJumpOnly),
+    null,
+  );
+});
+
+test('legacy migration hash invariance, 3-shortcut merge/dedup collision resolution, and vault/sync rejection', () => {
+  const legacyBookmark: Bookmark = {
+    title: 'GitHub',
+    url: 'https://github.com/',
+    section: 'Dev',
+    alias: '!GH',
+    searchUrl: 'github.com/search?q=%s',
+  };
+  const canonicalBookmark: Bookmark = {
+    title: 'GitHub',
+    url: 'https://github.com/',
+    section: 'Dev',
+    shortcuts: [{ alias: 'gh', queryUrl: 'https://github.com/search?q=%s' }],
+  };
+
+  assert.equal(areBookmarksEqual(legacyBookmark, canonicalBookmark), true);
+  assert.equal(
+    computeBookmarksHash([legacyBookmark]),
+    computeBookmarksHash([canonicalBookmark]),
+  );
+
+  // 3-shortcut incoming: #1 collides with Other, #2 enriches matched jump-only, #3 is brand new
+  const existing: Bookmark[] = [
+    { title: 'Other', url: 'https://other.example/', section: 'Dev', shortcuts: [{ alias: 'taken' }] },
+    { title: 'Docs', url: 'https://docs.example/', section: 'Dev', shortcuts: [{ alias: 'docs' }] },
+  ];
+  const incoming: Bookmark[] = [
+    {
+      title: 'Docs Updated',
+      url: 'https://docs.example/',
+      section: 'Dev',
+      shortcuts: [
+        { alias: 'taken', queryUrl: 'https://taken.example/?q=%s' },
+        { alias: 'docs', queryUrl: 'https://docs.example/search?q=%s' },
+        { alias: 'docs-api', queryUrl: 'https://docs.example/api?q=%s' },
+      ],
+    },
+  ];
+
+  const merged = applyBookmarkMerge(existing, incoming, 'merge');
+  assert.deepEqual(merged[0].shortcuts, [{ alias: 'taken' }]);
+  assert.deepEqual(merged[1].shortcuts, [
+    { alias: 'docs', queryUrl: 'https://docs.example/search?q=%s' },
+    { alias: 'docs-api', queryUrl: 'https://docs.example/api?q=%s' },
+  ]);
+  assert.doesNotThrow(() => parseBookmarks(JSON.stringify(merged)));
+
+  const appended = applyBookmarkMerge(existing, incoming, 'append');
+  assert.deepEqual(appended, existing);
+
+  const replaced = applyBookmarkMerge(existing, incoming, 'replace');
+  assert.equal(replaced.length, 1);
+  assert.deepEqual(replaced[0].shortcuts, [
+    { alias: 'taken', queryUrl: 'https://taken.example/?q=%s' },
+    { alias: 'docs', queryUrl: 'https://docs.example/search?q=%s' },
+    { alias: 'docs-api', queryUrl: 'https://docs.example/api?q=%s' },
+  ]);
+  assert.doesNotThrow(() => parseBookmarks(JSON.stringify(replaced)));
+
+  const deduped = deduplicateBookmarks([...existing, ...incoming]);
+  assert.equal(deduped.duplicateCount, 1);
+  assert.deepEqual(deduped.bookmarks[1].shortcuts, [
+    { alias: 'docs', queryUrl: 'https://docs.example/search?q=%s' },
+    { alias: 'docs-api', queryUrl: 'https://docs.example/api?q=%s' },
+  ]);
+  assert.doesNotThrow(() => parseBookmarks(JSON.stringify(deduped.bookmarks)));
+
+  // Vault: rejects intra-bookmark & cross-bookmark collisions across shortcuts[] + legacy alias, migrates valid legacy
+  const vaultMap = new Map<string, string>();
+  vaultMap.set(
+    SNAPSHOTS_KEY,
+    JSON.stringify({
+      version: 1,
+      snapshots: [
+        {
+          id: 'bad-intra',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          label: 'Intra collision',
+          trigger: 'manual',
+          bookmarks: [
+            {
+              title: 'GitHub',
+              url: 'https://github.com/',
+              section: 'Dev',
+              shortcuts: [{ alias: 'gh' }],
+              alias: '!GH',
+            },
+          ],
+        },
+        {
+          id: 'bad-cross',
+          createdAt: '2026-01-01T00:01:00.000Z',
+          label: 'Cross collision',
+          trigger: 'manual',
+          bookmarks: [
+            {
+              title: 'GitHub',
+              url: 'https://github.com/',
+              section: 'Dev',
+              shortcuts: [{ alias: 'gh' }, { alias: 'ghr' }],
+            },
+            {
+              title: 'Mirror',
+              url: 'https://mirror.example/',
+              section: 'Dev',
+              alias: '!GHR',
+            },
+          ],
+        },
+        {
+          id: 'good-legacy',
+          createdAt: '2026-01-01T00:02:00.000Z',
+          label: 'Valid legacy',
+          trigger: 'manual',
+          bookmarks: [legacyBookmark],
+        },
+      ],
+    }),
+  );
+
+  const loadedSnapshots = loadSnapshots({ getItem: (key: string) => vaultMap.get(key) ?? null });
+  assert.equal(loadedSnapshots.length, 1);
+  assert.equal(loadedSnapshots[0].id, 'good-legacy');
+  assert.deepEqual(loadedSnapshots[0].bookmarks[0].shortcuts, [
+    { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+  ]);
+  assert.equal(loadedSnapshots[0].bookmarks[0].alias, undefined);
+  assert.equal(loadedSnapshots[0].bookmarks[0].searchUrl, undefined);
+  assert.equal(loadedSnapshots[0].hash, computeBookmarksHash([canonicalBookmark]));
+
+  // Cross-tab sync: rejects intra/cross collisions, treats equivalent legacy as noop, migrates differing legacy
+  const syncIntra = evaluateExternalBookmarkChange({
+    rawNewValue: JSON.stringify([
+      { title: 'A', url: 'https://a.example/', section: 'Dev', shortcuts: [{ alias: 'a' }], alias: '!A' },
+    ]),
+    currentBookmarks: [canonicalBookmark],
+    currentSection: 'All',
+    currentActiveBookmark: null,
+    isEditModalOpen: false,
+    modalBaseHash: null,
+    modalBaseBookmarks: null,
+  });
+  assert.equal(syncIntra.kind, 'invalid-external');
+
+  const syncCross = evaluateExternalBookmarkChange({
+    rawNewValue: JSON.stringify([
+      { title: 'A', url: 'https://a.example/', section: 'Dev', shortcuts: [{ alias: 'a' }, { alias: 'b' }] },
+      { title: 'B', url: 'https://b.example/', section: 'Dev', alias: '!B' },
+    ]),
+    currentBookmarks: [canonicalBookmark],
+    currentSection: 'All',
+    currentActiveBookmark: null,
+    isEditModalOpen: false,
+    modalBaseHash: null,
+    modalBaseBookmarks: null,
+  });
+  assert.equal(syncCross.kind, 'invalid-external');
+
+  const syncEquivalentLegacy = evaluateExternalBookmarkChange({
+    rawNewValue: JSON.stringify([legacyBookmark]),
+    currentBookmarks: [canonicalBookmark],
+    currentSection: 'All',
+    currentActiveBookmark: null,
+    isEditModalOpen: false,
+    modalBaseHash: null,
+    modalBaseBookmarks: null,
+  });
+  assert.equal(syncEquivalentLegacy.kind, 'noop');
+
+  const syncNewLegacy = evaluateExternalBookmarkChange({
+    rawNewValue: JSON.stringify([legacyBookmark]),
+    currentBookmarks: [],
+    currentSection: 'All',
+    currentActiveBookmark: null,
+    isEditModalOpen: false,
+    modalBaseHash: null,
+    modalBaseBookmarks: null,
+  });
+  assert.equal(syncNewLegacy.kind, 'background-sync');
+  if (syncNewLegacy.kind === 'background-sync') {
+    assert.deepEqual(syncNewLegacy.bookmarks[0].shortcuts, [
+      { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+    ]);
+    assert.equal(syncNewLegacy.bookmarks[0].alias, undefined);
+    assert.equal(syncNewLegacy.bookmarks[0].searchUrl, undefined);
+  }
+});
+
+test('findShortcutLine ignores decoy "shortcuts": [...] strings with escaped quotes and backslashes', () => {
+  const decoyJson = [
+    '[',
+    '  {',
+    '    "title": "shortcuts",',
+    '    "url": "https://decoy.example/",',
+    '    "section": "Dev",',
+    '    "description": " Fake \\"shortcuts\\": [ { \\"alias\\": \\"x\\" } ] ends with \\\\",',
+    '    "shortcuts":',
+    '    [',
+    '      {',
+    '        "queryUrl": "https://decoy.example/?q=%s&fake=\\"alias\\"",',
+    '        "alias": "ok"',
+    '      },',
+    '      {',
+    '        "alias": "bad alias!"',
+    '      }',
+    '    ]',
+    '  }',
+    ']',
+  ].join('\n');
+
+  assert.equal(findShortcutLine(decoyJson, 1, 1, 'alias'), 11);
+  assert.equal(findShortcutLine(decoyJson, 1, 2, 'alias'), 14);
+
+  let caught: unknown;
+  try {
+    parseBookmarks(decoyJson);
+  } catch (err) {
+    caught = err;
+  }
+  assert.equal(
+    formatBookmarkError(caught, decoyJson, 'Couldn’t save changes').detail,
+    'Bookmark 1 (line 14): shortcut 2 “alias” must be 1-32 lowercase letters, numbers, or hyphens.',
+  );
 });

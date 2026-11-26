@@ -277,11 +277,11 @@ test('detects format, preserves unknown keys on JSON import, and validates parse
   assert.equal(imported.format, 'json');
   assert.equal(imported.bookmarks[0].section, 'Uncategorized');
   assert.equal(imported.bookmarks[0].iconUrl, 'https://cdn.example.com/i.png');
-  assert.equal((imported.bookmarks[0] as unknown as Record<string, unknown>).alias, 'd');
-  assert.equal(
-    (imported.bookmarks[0] as unknown as Record<string, unknown>).searchUrl,
-    'https://docs.example/?q=%s',
-  );
+  assert.deepEqual(imported.bookmarks[0].shortcuts, [
+    { alias: 'd', queryUrl: 'https://docs.example/?q=%s' },
+  ]);
+  assert.equal((imported.bookmarks[0] as unknown as Record<string, unknown>).alias, undefined);
+  assert.equal((imported.bookmarks[0] as unknown as Record<string, unknown>).searchUrl, undefined);
 
   assert.throws(
     () => parseEditorBookmarks('[{"title":"A","url":"https://a.example","section":" all "}]'),
@@ -306,7 +306,8 @@ test('detects format, preserves unknown keys on JSON import, and validates parse
   assert.equal(edited[0].iconUrl, 'https://cdn.example.com/a.png');
   assert.equal('description' in edited[0], false);
   assert.deepEqual(edited[0].categories, ['one']);
-  assert.equal((edited[0] as unknown as Record<string, unknown>).alias, 'aw');
+  assert.deepEqual(edited[0].shortcuts, [{ alias: 'aw' }]);
+  assert.equal((edited[0] as unknown as Record<string, unknown>).alias, undefined);
   assert.deepEqual(parseEditorBookmarks('[]'), []);
 });
 

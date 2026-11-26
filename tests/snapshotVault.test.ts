@@ -129,7 +129,8 @@ test('loadSnapshots validates per entry, preserves unknown keys, and recomputes 
   assert.equal(loaded[0].bookmarkCount, 1);
   assert.equal(loaded[0].sectionCount, 1);
   assert.equal(loaded[0].bookmarks[0].section, 'Uncategorized');
-  assert.equal((loaded[0].bookmarks[0] as unknown as Record<string, unknown>).alias, 'g');
+  assert.deepEqual(loaded[0].bookmarks[0].shortcuts, [{ alias: 'g' }]);
+  assert.equal((loaded[0].bookmarks[0] as unknown as Record<string, unknown>).alias, undefined);
   assert.equal(loaded[0].hash, computeBookmarksHash(loaded[0].bookmarks));
 });
 
@@ -712,4 +713,65 @@ test('full-ring deduplication preserves manual trigger/label on auto-match and u
   const reloaded = loadSnapshots(storage);
   assert.equal(reloaded.length, 4);
   assert.equal(new Set(reloaded.map((s) => s.hash)).size, 4);
+});
+
+test('loadSnapshots validates multi-shortcut arrays and rejects intra- or cross-bookmark shortcut collisions', () => {
+  const storage = createCappedStorage();
+  storage.setItem(
+    SNAPSHOTS_KEY,
+    JSON.stringify({
+      version: 1,
+      snapshots: [
+        {
+          id: 'snap-multi-ok',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          label: 'Valid multi',
+          trigger: 'manual',
+          bookmarks: [
+            {
+              title: 'GitHub',
+              url: 'https://github.com/',
+              section: 'Dev',
+              shortcuts: [
+                { alias: '!GH', queryUrl: 'github.com/search?q=%s' },
+                { alias: 'ghr' },
+              ],
+            },
+          ],
+        },
+        {
+          id: 'snap-intra-dup',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          label: 'Intra dup',
+          trigger: 'manual',
+          bookmarks: [
+            {
+              title: 'Bad',
+              url: 'https://bad.example/',
+              section: 'Dev',
+              shortcuts: [{ alias: 'dup' }, { alias: '!DUP' }],
+            },
+          ],
+        },
+        {
+          id: 'snap-cross-dup',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          label: 'Cross dup',
+          trigger: 'manual',
+          bookmarks: [
+            { title: 'A', url: 'https://a.example/', section: 'Dev', shortcuts: [{ alias: 'x' }] },
+            { title: 'B', url: 'https://b.example/', section: 'Dev', shortcuts: [{ alias: 'y' }, { alias: 'x' }] },
+          ],
+        },
+      ],
+    }),
+  );
+
+  const loaded = loadSnapshots(storage);
+  assert.equal(loaded.length, 1);
+  assert.equal(loaded[0].id, 'snap-multi-ok');
+  assert.deepEqual(loaded[0].bookmarks[0].shortcuts, [
+    { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+    { alias: 'ghr' },
+  ]);
 });

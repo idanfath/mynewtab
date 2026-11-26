@@ -18,8 +18,11 @@ import {
     STORAGE_KEY,
     applyBookmarkSave,
     classifyStoredDataFailure,
+    findBookmarkShortcut,
     findMatchingBookmark,
     findMatchingBookmarkIndex,
+    formatBookmarkShortcutBadges,
+    getBookmarkShortcuts,
     groupBookmarksBySection,
     insertBookmarkInSection,
     loadStoredBookmarks,
@@ -305,11 +308,17 @@ test('accepts bookmark data only when its shape, URLs, aliases, and searchUrls a
                 title: 'GitHub',
                 url: 'https://github.com/',
                 section: 'Dev',
-                alias: 'gh',
-                searchUrl: 'https://github.com/search?q=%s',
+                shortcuts: [
+                    { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+                ],
             },
             { title: 'Notes', url: 'https://notes.example/', section: 'Work' },
-            { title: 'SoloAlias', url: 'https://solo.example/', section: 'Work', alias: 'solo' },
+            {
+                title: 'SoloAlias',
+                url: 'https://solo.example/',
+                section: 'Work',
+                shortcuts: [{ alias: 'solo' }],
+            },
             {
                 title: 'SoloSearch',
                 url: 'https://search.example/',
@@ -792,12 +801,18 @@ test('allows editing a bookmark when another bookmark shares its URL identity, w
     if (!savedPinned.ok) return;
     assert.equal(savedPinned.bookmarks.length, 3);
     assert.equal(savedPinned.bookmarks[0], gamesWplace);
-    assert.deepEqual(savedPinned.bookmarks[1], editedPinned);
+    assert.deepEqual(savedPinned.bookmarks[1], {
+        title: 'Wplace',
+        url: 'https://wplace.live/',
+        section: 'Pinned',
+        shortcuts: [{ alias: 'aa', queryUrl: 'https://wplace.live/search?q=%s' }],
+    });
+    assert.equal(savedPinned.bookmarks[1], savedPinned.bookmark);
     assert.equal(savedPinned.bookmarks[2], github);
-    // Persisted result remains valid on reload
+    // Persisted result remains valid on reload (legacy github migrates on parseBookmarks)
     assert.deepEqual(
-        parseBookmarks(JSON.stringify(savedPinned.bookmarks)),
-        savedPinned.bookmarks,
+        parseBookmarks(JSON.stringify(savedPinned.bookmarks))[1],
+        savedPinned.bookmark,
     );
 
     // Re-saving Pinned copy with equivalent URL variant (same urlIdentity) and keeping its own !aa shortcut succeeds
@@ -917,9 +932,13 @@ test('disambiguates detached bookmark references across duplicate URLs by sectio
     assert.equal(detachedSave.ok, true);
     if (detachedSave.ok) {
         assert.equal(detachedSave.bookmarks[0], gamesWplace);
-        assert.equal(detachedSave.bookmarks[0].alias, undefined);
+        assert.equal(detachedSave.bookmarks[0].shortcuts, undefined);
         assert.equal(detachedSave.bookmarks[1].section, 'Pinned');
-        assert.equal(detachedSave.bookmarks[1].alias, 'aa');
+        assert.deepEqual(detachedSave.bookmarks[1].shortcuts, [
+            { alias: 'aa', queryUrl: 'https://wplace.live/search?q=%s' },
+        ]);
+        assert.equal(detachedSave.bookmarks[1].alias, undefined);
+        assert.equal(detachedSave.bookmarks[1].searchUrl, undefined);
     }
 
     // External title edit in same section still prefers matching section over another section's old title
@@ -946,4 +965,165 @@ test('disambiguates detached bookmark references across duplicate URLs by sectio
         ),
         movedDistinctTitle,
     );
+});
+
+test('multi-shortcut helpers, badge formatting, parsing, search boosting, and save validation work end-to-end', () => {
+    // getBookmarkShortcuts + formatBookmarkShortcutBadges across 0/1/2/3+ shortcuts
+    const zero: Bookmark = { title: 'Zero', url: 'https://zero.example/', section: 'Work' };
+    const one: Bookmark = {
+        title: 'One',
+        url: 'https://one.example/',
+        section: 'Work',
+        shortcuts: [{ alias: '!GH', queryUrl: 'github.com/search?q=%s' }],
+    };
+    const two: Bookmark = {
+        title: 'Two',
+        url: 'https://two.example/',
+        section: 'Work',
+        shortcuts: [
+            { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+            { alias: 'ghr', queryUrl: 'https://github.com/search?type=repositories&q=%s' },
+        ],
+    };
+    const four: Bookmark = {
+        title: 'Four',
+        url: 'https://four.example/',
+        section: 'Work',
+        shortcuts: [
+            { alias: 'a1' },
+            { alias: 'a2', queryUrl: 'https://four.example/?q=%s' },
+            { alias: 'a3' },
+            { alias: 'a4' },
+        ],
+    };
+
+    assert.deepEqual(getBookmarkShortcuts(zero), []);
+    assert.deepEqual(formatBookmarkShortcutBadges(zero), { visible: [], overflowCount: 0 });
+    assert.deepEqual(getBookmarkShortcuts(one), [
+        { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+    ]);
+    assert.deepEqual(formatBookmarkShortcutBadges(one), { visible: ['gh'], overflowCount: 0 });
+    assert.deepEqual(formatBookmarkShortcutBadges(two), { visible: ['gh', 'ghr'], overflowCount: 0 });
+    assert.deepEqual(formatBookmarkShortcutBadges(four), { visible: ['a1', 'a2'], overflowCount: 2 });
+
+    // findBookmarkShortcut with requireQueryUrl toggle
+    assert.equal(findBookmarkShortcut([four], 'a1', false)?.shortcut.alias, 'a1');
+    assert.equal(findBookmarkShortcut([four], 'a1', true), undefined);
+    assert.equal(findBookmarkShortcut([four], 'a2', true)?.shortcut.queryUrl, 'https://four.example/?q=%s');
+
+    // parseBookmarks validates shortcuts[], accepts lenient searchUrl inside shortcuts, rejects duplicates/invalid shapes
+    const parsedMulti = parseBookmarks(JSON.stringify([
+        {
+            title: 'GitHub',
+            url: 'https://github.com/',
+            section: 'Dev',
+            shortcuts: [
+                { alias: '!GH', queryUrl: 'github.com/search?q=%s' },
+                { alias: 'ghr', searchUrl: 'https://github.com/search?type=repositories&q=%s' },
+                { alias: 'gh-home' },
+            ],
+        },
+        {
+            title: 'Mixed Legacy',
+            url: 'https://mixed.example/',
+            section: 'Dev',
+            shortcuts: [{ alias: 'm1' }],
+            alias: 'm2',
+            searchUrl: 'https://mixed.example/?q=%s',
+        },
+    ]));
+    assert.deepEqual(parsedMulti[0].shortcuts, [
+        { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+        { alias: 'ghr', queryUrl: 'https://github.com/search?type=repositories&q=%s' },
+        { alias: 'gh-home' },
+    ]);
+    assert.deepEqual(parsedMulti[1].shortcuts, [
+        { alias: 'm1' },
+        { alias: 'm2', queryUrl: 'https://mixed.example/?q=%s' },
+    ]);
+    assert.equal('alias' in parsedMulti[1], false);
+    assert.equal('searchUrl' in parsedMulti[1], false);
+
+    assert.throws(
+        () => parseBookmarks('[{"title":"Bad","url":"https://a.example","section":"Dev","shortcuts":"gh"}]'),
+        /Bookmark 1\.shortcuts must be an array\./,
+    );
+    assert.throws(
+        () => parseBookmarks('[{"title":"Bad","url":"https://a.example","section":"Dev","shortcuts":[null]}]'),
+        /Bookmark 1\.shortcuts\[1\] must be an object\./,
+    );
+    assert.throws(
+        () => parseBookmarks('[{"title":"Bad","url":"https://a.example","section":"Dev","shortcuts":[{"alias":"gh"},{"alias":"!GH"}]}]'),
+        /Bookmark 1\.shortcuts\[2\]\.alias duplicates "gh" in Bookmark 1\./,
+    );
+    assert.throws(
+        () => parseBookmarks('[{"title":"A","url":"https://a.example","section":"Dev","shortcuts":[{"alias":"gh"}]},{"title":"B","url":"https://b.example","section":"Dev","shortcuts":[{"alias":"gh"}]}]'),
+        /Bookmark 2\.shortcuts\[1\]\.alias duplicates "gh" from Bookmark 1 shortcut 1 \(A\)\./,
+    );
+    assert.throws(
+        () => parseBookmarks('[{"title":"Bad","url":"https://a.example","section":"Dev","shortcuts":[{"alias":"gh","queryUrl":"https://a.example/no-placeholder"}]}]'),
+        /Bookmark 1\.shortcuts\[1\]\.queryUrl must be a valid HTTP\(S\) query URL containing %s\./,
+    );
+
+    // searchBookmarks exact match across secondary shortcut beats prefix match on primary shortcut
+    const bPrefix: Bookmark = {
+        title: 'GitHub Repo',
+        url: 'https://repo.example/',
+        section: 'Dev',
+        shortcuts: [{ alias: 'gh-repo' }],
+    };
+    const bExactSecondary: Bookmark = {
+        title: 'GitHub Main',
+        url: 'https://github.com/',
+        section: 'Dev',
+        shortcuts: [{ alias: 'github' }, { alias: 'gh' }],
+    };
+    const ranked = searchBookmarks([bPrefix, bExactSecondary], 'gh');
+    assert.equal(ranked[0], bExactSecondary);
+
+    // applyBookmarkSave rejects intra-bookmark duplicates, orphan queryUrl, bad alias, cross-bookmark collision
+    const dupIntra = applyBookmarkSave(
+        [],
+        {
+            title: 'GitHub',
+            url: 'https://github.com/',
+            section: 'Dev',
+            shortcuts: [{ alias: 'gh' }, { alias: '!GH' }],
+        },
+        null,
+    );
+    assert.deepEqual(dupIntra, {
+        ok: false,
+        error: 'Duplicate shortcut “!gh” on this bookmark.',
+    });
+
+    const orphanQuery = applyBookmarkSave(
+        [],
+        {
+            title: 'GitHub',
+            url: 'https://github.com/',
+            section: 'Dev',
+            shortcuts: [{ alias: '', queryUrl: 'https://github.com/search?q=%s' }],
+        },
+        null,
+    );
+    assert.deepEqual(orphanQuery, {
+        ok: false,
+        error: 'Add a shortcut (!bang) to use a query URL.',
+    });
+
+    const crossCollision = applyBookmarkSave(
+        [bExactSecondary],
+        {
+            title: 'Gitea',
+            url: 'https://gitea.example/',
+            section: 'Dev',
+            shortcuts: [{ alias: 'gt' }, { alias: 'gh' }],
+        },
+        null,
+    );
+    assert.deepEqual(crossCollision, {
+        ok: false,
+        error: '“GitHub Main” already uses shortcut !gh.',
+    });
 });

@@ -7,6 +7,7 @@ import {
   OMNIBAR_BACKUP_KEY,
   OMNIBAR_STORAGE_KEY,
   buildWebSearchUrl,
+  collectBookmarkBangEntries,
   detectDirectUrl,
   getBookmarkOmnibarIcon,
   getEnabledBuiltInBangs,
@@ -826,4 +827,86 @@ test('resolveEmptyOmnibarState coordinates search expansion, drawer state, exit 
   assert.equal(dropping.triggerTabIndex, -1);
   assert.equal(dropping.inputTabIndex, -1);
   assert.equal(dropping.resultTabIndex, -1);
+});
+
+test('multi-shortcut omnibar resolution, Tab completion, and collectBookmarkBangEntries work across all shortcuts', () => {
+  const multiBm: Bookmark = {
+    title: 'GitHub',
+    url: 'https://github.com/',
+    section: 'Dev',
+    shortcuts: [
+      { alias: 'gh-home' },
+      { alias: 'ghr', queryUrl: 'https://github.com/search?type=repositories&q=%s' },
+      { alias: 'ghi', queryUrl: 'https://github.com/search?type=issues&q=%s' },
+    ],
+  };
+
+  const bareBangMulti = resolveOmnibar('!', [multiBm], DEFAULT_OMNIBAR_SETTINGS, []);
+  assert.equal(bareBangMulti?.tabCompletion, '!gh-home ');
+  assert.match(bareBangMulti?.subtitle ?? '', /!gh-home · !ghr · !ghi/);
+
+  const multiQuery = resolveOmnibar('!ghr react', [multiBm], DEFAULT_OMNIBAR_SETTINGS, []);
+  assert.equal(multiQuery?.kind, 'bang-search');
+  assert.equal(multiQuery?.url, 'https://github.com/search?type=repositories&q=react');
+
+  const multiBareQuery = resolveOmnibar('ghi hooks', [multiBm], DEFAULT_OMNIBAR_SETTINGS, []);
+  assert.equal(multiBareQuery?.kind, 'bang-search');
+  assert.equal(multiBareQuery?.url, 'https://github.com/search?type=issues&q=hooks');
+
+  const rescueJumpOnly = resolveOmnibar('gh-home', [multiBm], DEFAULT_OMNIBAR_SETTINGS, []);
+  assert.equal(rescueJumpOnly?.kind, 'bookmark-alias');
+  assert.equal(rescueJumpOnly?.tabCompletion, undefined);
+  assert.equal(rescueJumpOnly?.subtitle, '!gh-home · in Dev');
+
+  const rescueQueryable = resolveOmnibar('ghr', [multiBm], DEFAULT_OMNIBAR_SETTINGS, []);
+  assert.equal(rescueQueryable?.kind, 'bookmark-alias');
+  assert.equal(rescueQueryable?.tabCompletion, '!ghr ');
+  assert.equal(rescueQueryable?.subtitle, '!ghr · in Dev · Tab to enter query');
+
+  // resolveTabCompletion picks exact -> prefix -> first queryable shortcut
+  assert.equal(resolveTabCompletion('ghi', { kind: 'bookmark', bookmark: multiBm }, null), '!ghi ');
+  assert.equal(resolveTabCompletion('gh', { kind: 'bookmark', bookmark: multiBm }, null), '!ghr ');
+  assert.equal(resolveTabCompletion('git', { kind: 'bookmark', bookmark: multiBm }, null), '!ghr ');
+
+  // collectBookmarkBangEntries skips 0-shortcut bookmarks and computes override notes accurately
+  const entries = collectBookmarkBangEntries(
+    [
+      { title: 'Plain', url: 'https://plain.example/', section: 'Work' },
+      {
+        title: 'GitHub',
+        url: 'https://github.com/',
+        section: 'Dev',
+        shortcuts: [
+          { alias: 'gh', queryUrl: 'https://github.com/search?q=%s' },
+          { alias: 'docs' },
+          { alias: 'w' },
+        ],
+      },
+    ],
+    new Set(['gh', 'docs']),
+    new Set(),
+  );
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].shortcuts[0].overrideNote, 'Overrides custom !bang');
+  assert.equal(
+    entries[0].shortcuts[1].overrideNote,
+    'Bare !docs opens bookmark · !docs <query> uses custom !bang',
+  );
+  assert.equal(entries[0].shortcuts[2].overrideNote, 'Overrides built-in !bang');
+  assert.equal(entries[0].shortcuts[2].targetLabel, 'Jump to github.com');
+
+  // When built-in !w is disabled, no built-in override note is emitted
+  const entriesWithDisabled = collectBookmarkBangEntries(
+    [
+      {
+        title: 'Wiki',
+        url: 'https://wiki.example/',
+        section: 'Ref',
+        shortcuts: [{ alias: 'w' }],
+      },
+    ],
+    new Set(),
+    new Set(['w']),
+  );
+  assert.equal(entriesWithDisabled[0].shortcuts[0].overrideNote, undefined);
 });

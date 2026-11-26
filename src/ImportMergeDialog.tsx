@@ -17,6 +17,7 @@ interface ImportMergeDialogProps {
   incomingBookmarks: Bookmark[];
   skippedNonHttpCount: number;
   intraFileDuplicateCount: number;
+  pendingSettingsFileName?: string;
   conflict: ExternalSyncConflict | null;
   onLoadExternal: () => void;
   onCancel: () => void;
@@ -32,8 +33,8 @@ const FIELD_LABELS: Record<BookmarkField, string> = {
   title: 'title',
   url: 'URL',
   section: 'section',
-  alias: 'shortcut',
-  searchUrl: 'site search',
+  shortcuts: 'shortcuts',
+  searchUrl: 'query URL',
   subsection: 'group',
   description: 'description',
   iconUrl: 'icon',
@@ -75,6 +76,7 @@ export default function ImportMergeDialog({
   incomingBookmarks,
   skippedNonHttpCount,
   intraFileDuplicateCount,
+  pendingSettingsFileName,
   conflict,
   onLoadExternal,
   onCancel,
@@ -89,11 +91,12 @@ export default function ImportMergeDialog({
     [existingBookmarks, incomingBookmarks, strategy],
   );
 
+  const hasAnyEffectiveChanges = preview.hasEffectiveChanges || Boolean(pendingSettingsFileName);
   const visibleRows = preview.affectedRows.slice(0, PREVIEW_ROW_LIMIT);
   const hiddenRowCount = Math.max(0, preview.affectedRows.length - visibleRows.length);
 
   const commit = (overwriteExternalConflict: boolean) => {
-    if (!preview.hasEffectiveChanges) {
+    if (!hasAnyEffectiveChanges) {
       onCancel();
       return;
     }
@@ -103,7 +106,7 @@ export default function ImportMergeDialog({
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (conflict && preview.hasEffectiveChanges) {
+    if (conflict && hasAnyEffectiveChanges) {
       focusConflictBanner(dialogRef.current);
       setError('Resolve the external tab conflict above first.');
       return;
@@ -111,13 +114,15 @@ export default function ImportMergeDialog({
     commit(false);
   };
 
-  const submitLabel = !preview.hasEffectiveChanges
+  const submitLabel = !hasAnyEffectiveChanges
     ? 'Close (no changes)'
-    : strategy === 'merge'
-      ? 'Merge bookmarks'
-      : strategy === 'append'
-        ? `Add ${preview.addedCount} new`
-        : 'Replace directory';
+    : !preview.hasEffectiveChanges && pendingSettingsFileName
+      ? 'Import search settings'
+      : strategy === 'merge'
+        ? 'Merge bookmarks'
+        : strategy === 'append'
+          ? `Add ${preview.addedCount} new`
+          : 'Replace directory';
 
   const submitClass = !preview.hasEffectiveChanges || strategy !== 'replace'
     ? 'is-primary'
@@ -144,7 +149,7 @@ export default function ImportMergeDialog({
             onCancel();
             return;
           }
-          if (event.key === 'Enter' && conflict !== null && preview.hasEffectiveChanges) {
+          if (event.key === 'Enter' && conflict !== null && hasAnyEffectiveChanges) {
             const target = event.target instanceof HTMLElement ? event.target : null;
             if (!target || !target.closest('.app-conflict-banner, button, textarea, summary')) {
               event.preventDefault();
@@ -174,6 +179,15 @@ export default function ImportMergeDialog({
                     : ''}
                 </span>
               </div>
+              {pendingSettingsFileName && (
+                <div className="app-merge-source app-merge-settings-companion">
+                  <span className="app-merge-format-pill">SETTINGS</span>
+                  <code>{pendingSettingsFileName}</code>
+                  <span className="app-merge-source-meta">
+                    Search settings will also be imported
+                  </span>
+                </div>
+              )}
             </div>
             <button type="button" className="app-form-close" onClick={onCancel}>
               Cancel
@@ -187,7 +201,7 @@ export default function ImportMergeDialog({
                 setError('');
                 onLoadExternal();
               }}
-              onSaveMine={preview.hasEffectiveChanges
+              onSaveMine={hasAnyEffectiveChanges
                 ? () => {
                   setError('');
                   commit(true);
@@ -245,7 +259,9 @@ export default function ImportMergeDialog({
             <div className="app-merge-preview" tabIndex={0} aria-label="Affected bookmarks preview">
               {!preview.hasEffectiveChanges ? (
                 <p className="app-merge-empty">
-                  Directory already matches this import under selected strategy.
+                  {pendingSettingsFileName
+                    ? `Directory already matches under selected strategy. Search settings from “${pendingSettingsFileName}” will still be imported.`
+                    : 'Directory already matches this import under selected strategy.'}
                 </p>
               ) : preview.orderChanged && visibleRows.length === 0 ? (
                 <p className="app-merge-empty">
@@ -295,7 +311,7 @@ export default function ImportMergeDialog({
             <button
               type="submit"
               className={submitClass}
-              disabled={conflict !== null && preview.hasEffectiveChanges}
+              disabled={conflict !== null && hasAnyEffectiveChanges}
             >
               {submitLabel}
             </button>

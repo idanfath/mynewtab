@@ -4,12 +4,14 @@ import {
   OMNIBAR_BACKUP_KEY,
   OMNIBAR_STORAGE_KEY,
   loadStoredOmnibarSettings,
+  serializeOmnibarStorageValue,
   type OmnibarSettings,
 } from './omnibar.ts';
 import type { AppError } from './useBookmarks.ts';
 
 export type InitialOmnibarState = {
   settings: OmnibarSettings;
+  extraSections?: Record<string, unknown>;
   error: AppError | null;
 };
 
@@ -17,8 +19,16 @@ export function buildInitialOmnibarState(
   storage: Pick<Storage, 'getItem' | 'setItem'>,
 ): InitialOmnibarState {
   try {
-    const { settings, recovery, failure } = loadStoredOmnibarSettings(storage);
-    if (!recovery) return { settings, error: null };
+    const { settings, extraSections, recovery, failure } = loadStoredOmnibarSettings(storage);
+    if (!recovery) {
+      return {
+        settings,
+        ...(extraSections && Object.keys(extraSections).length > 0
+          ? { extraSections }
+          : {}),
+        error: null,
+      };
+    }
 
     const cause = failure === 'invalid'
       ? 'The saved search settings are complete JSON but contain invalid entries.'
@@ -69,22 +79,44 @@ export function useOmnibarSettings() {
   const [omnibarSettings, setOmnibarSettings] = useState<OmnibarSettings>(
     initialState.settings,
   );
+  const [extraSettingsSections, setExtraSettingsSections] = useState<
+    Record<string, unknown>
+  >(() => initialState.extraSections ?? {});
 
-  const persistOmnibarSettings = (next: OmnibarSettings): boolean => {
+  const persistOmnibarSettings = (
+    next: OmnibarSettings,
+    nextExtra?: Record<string, unknown>,
+  ): boolean => {
+    const effectiveExtra = nextExtra ?? extraSettingsSections;
     try {
-      localStorage.setItem(OMNIBAR_STORAGE_KEY, JSON.stringify(next));
+      localStorage.setItem(
+        OMNIBAR_STORAGE_KEY,
+        serializeOmnibarStorageValue(next, effectiveExtra),
+      );
     } catch {
       return false;
     }
     setOmnibarSettings(next);
+    if (nextExtra !== undefined) {
+      setExtraSettingsSections(nextExtra);
+    }
     return true;
   };
 
+  const applyOmnibarSettingsState = useCallback(
+    (next: OmnibarSettings, nextExtra: Record<string, unknown> = {}) => {
+      setOmnibarSettings(next);
+      setExtraSettingsSections(nextExtra);
+    },
+    [],
+  );
+
   const refreshOmnibarFromStorage = useCallback(() => {
     try {
-      const { settings, recovery } = loadStoredOmnibarSettings(localStorage);
+      const { settings, extraSections, recovery } = loadStoredOmnibarSettings(localStorage);
       if (!recovery) {
         setOmnibarSettings(settings);
+        setExtraSettingsSections(extraSections ?? {});
       }
     } catch {
       // ignore blocked storage
@@ -93,8 +125,10 @@ export function useOmnibarSettings() {
 
   return {
     omnibarSettings,
+    extraSettingsSections,
     initialOmnibarError: initialState.error,
     persistOmnibarSettings,
+    applyOmnibarSettingsState,
     refreshOmnibarFromStorage,
   };
 }

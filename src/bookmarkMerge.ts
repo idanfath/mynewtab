@@ -1,6 +1,10 @@
-import { groupBookmarksBySection, type Bookmark } from './bookmarks.ts';
 import {
-  normalizeAlias,
+  getBookmarkShortcuts,
+  groupBookmarksBySection,
+  type Bookmark,
+  type BookmarkShortcut,
+} from './bookmarks.ts';
+import {
   normalizeSearchUrl,
   normalizeUrl,
   urlIdentity,
@@ -12,7 +16,7 @@ export type BookmarkField =
   | 'title'
   | 'url'
   | 'section'
-  | 'alias'
+  | 'shortcuts'
   | 'searchUrl'
   | 'subsection'
   | 'description'
@@ -60,8 +64,6 @@ export interface StrategyPreview {
 }
 
 const OPTIONAL_SCALAR_FIELDS = [
-  'alias',
-  'searchUrl',
   'subsection',
   'description',
   'iconUrl',
@@ -86,6 +88,9 @@ const KNOWN_BOOKMARK_KEYS = new Set<string>([
   'title',
   'url',
   'section',
+  'shortcuts',
+  'alias',
+  'searchUrl',
   ...OPTIONAL_SCALAR_FIELDS,
   ...ALL_OPTIONAL_ARRAY_FIELDS,
 ]);
@@ -155,6 +160,17 @@ export function canonicalizeBookmark(bookmark: Bookmark): Record<string, unknown
     section: bookmark.section.trim(),
   };
 
+  const shortcuts = getBookmarkShortcuts(bookmark);
+  if (shortcuts.length > 0) {
+    unsorted.shortcuts = shortcuts;
+  } else if (bookmark.shortcuts === undefined && typeof bookmark.searchUrl === 'string') {
+    const trimmedSearch = bookmark.searchUrl.trim();
+    if (trimmedSearch) {
+      const normalizedSearch = normalizeSearchUrl(trimmedSearch);
+      if (normalizedSearch) unsorted.searchUrl = normalizedSearch;
+    }
+  }
+
   for (const field of OPTIONAL_SCALAR_FIELDS) {
     const value = bookmark[field];
     if (typeof value !== 'string') continue;
@@ -162,12 +178,6 @@ export function canonicalizeBookmark(bookmark: Bookmark): Record<string, unknown
     if (!trimmed) continue;
     if (field === 'iconUrl') {
       unsorted.iconUrl = normalizeUrl(trimmed) || trimmed;
-    } else if (field === 'alias') {
-      const normalizedAlias = normalizeAlias(trimmed);
-      if (normalizedAlias) unsorted.alias = normalizedAlias;
-    } else if (field === 'searchUrl') {
-      const normalizedSearch = normalizeSearchUrl(trimmed);
-      if (normalizedSearch) unsorted.searchUrl = normalizedSearch;
     } else {
       unsorted[field] = trimmed;
     }
@@ -239,7 +249,7 @@ export function getChangedBookmarkFields(a: Bookmark, b: Bookmark): BookmarkFiel
     'title',
     'url',
     'section',
-    'alias',
+    'shortcuts',
     'searchUrl',
     'subsection',
     'description',
@@ -269,6 +279,47 @@ export function enrichBookmark(
   const patch: Partial<Bookmark> = {};
   const changedFields: BookmarkField[] = [];
 
+  const mergedShortcuts: BookmarkShortcut[] = getBookmarkShortcuts(existing).map((s) => ({
+    ...s,
+  }));
+  const existingByAlias = new Map<string, BookmarkShortcut>(
+    mergedShortcuts.map((s) => [s.alias, s]),
+  );
+  const incomingShortcuts = getBookmarkShortcuts(incoming);
+  let shortcutsChanged = false;
+
+  for (const inc of incomingShortcuts) {
+    const owned = existingByAlias.get(inc.alias);
+    if (owned) {
+      if (!owned.queryUrl && inc.queryUrl) {
+        owned.queryUrl = inc.queryUrl;
+        shortcutsChanged = true;
+      }
+    } else if (!reservedAliases?.has(inc.alias)) {
+      const added: BookmarkShortcut = inc.queryUrl
+        ? { alias: inc.alias, queryUrl: inc.queryUrl }
+        : { alias: inc.alias };
+      mergedShortcuts.push(added);
+      existingByAlias.set(inc.alias, added);
+      reservedAliases?.add(inc.alias);
+      shortcutsChanged = true;
+    }
+  }
+
+  if (shortcutsChanged) {
+    changedFields.push('shortcuts');
+  } else if (mergedShortcuts.length === 0 && incomingShortcuts.length === 0) {
+    const existingSearch = existing.searchUrl?.trim() ?? '';
+    const incomingSearch = incoming.searchUrl?.trim() ?? '';
+    if (!existingSearch && incomingSearch) {
+      const normalizedSearch = normalizeSearchUrl(incomingSearch);
+      if (normalizedSearch) {
+        patch.searchUrl = normalizedSearch;
+        changedFields.push('searchUrl');
+      }
+    }
+  }
+
   for (const field of OPTIONAL_SCALAR_FIELDS) {
     const existingValue = existing[field]?.trim() ?? '';
     const incomingValue = incoming[field]?.trim() ?? '';
@@ -278,19 +329,6 @@ export function enrichBookmark(
         if (normalizedIcon) {
           patch.iconUrl = normalizedIcon;
           changedFields.push('iconUrl');
-        }
-      } else if (field === 'alias') {
-        const normalizedAlias = normalizeAlias(incomingValue);
-        if (normalizedAlias && !reservedAliases?.has(normalizedAlias)) {
-          patch.alias = normalizedAlias;
-          changedFields.push('alias');
-          reservedAliases?.add(normalizedAlias);
-        }
-      } else if (field === 'searchUrl') {
-        const normalizedSearch = normalizeSearchUrl(incomingValue);
-        if (normalizedSearch) {
-          patch.searchUrl = normalizedSearch;
-          changedFields.push('searchUrl');
         }
       } else {
         patch[field] = incomingValue;
@@ -332,13 +370,90 @@ export function enrichBookmark(
     return { bookmark: existing, changedFields: [] };
   }
 
+  const next = {
+    ...(cloneWithoutProto(existing) as Record<string, unknown>),
+    ...patch,
+  } as Bookmark;
+
+  if (mergedShortcuts.length > 0) {
+    next.shortcuts = mergedShortcuts;
+    delete next.alias;
+    delete next.searchUrl;
+  } else {
+    delete next.shortcuts;
+    delete next.alias;
+  }
+
   return {
-    bookmark: {
-      ...(cloneWithoutProto(existing) as Record<string, unknown>),
-      ...patch,
-    } as Bookmark,
+    bookmark: next,
     changedFields,
   };
+}
+
+function shortcutsEqual(
+  raw: readonly BookmarkShortcut[] | undefined,
+  canonical: readonly BookmarkShortcut[],
+): boolean {
+  if (!raw) return canonical.length === 0;
+  if (raw.length !== canonical.length) return false;
+  for (let i = 0; i < raw.length; i += 1) {
+    const a = raw[i];
+    const b = canonical[i];
+    if (!a || a.alias !== b.alias || (a.queryUrl ?? undefined) !== (b.queryUrl ?? undefined)) {
+      return false;
+    }
+    if ('searchUrl' in (a as unknown as Record<string, unknown>)) return false;
+  }
+  return true;
+}
+
+function filterAndCanonicalizeShortcuts(
+  bookmark: Bookmark,
+  blockedAliases?: ReadonlySet<string>,
+  claimAliases?: Set<string>,
+): Bookmark {
+  const rawShortcuts = getBookmarkShortcuts(bookmark);
+  const kept = blockedAliases
+    ? rawShortcuts.filter((shortcut) => !blockedAliases.has(shortcut.alias))
+    : rawShortcuts;
+
+  if (claimAliases) {
+    for (const shortcut of kept) {
+      claimAliases.add(shortcut.alias);
+    }
+  }
+
+  const hasLegacyKeys = bookmark.alias !== undefined || bookmark.searchUrl !== undefined;
+  const rawSearch = bookmark.searchUrl?.trim();
+  const normalizedSearch = rawSearch ? normalizeSearchUrl(rawSearch) : '';
+  const keepOrphanSearch = rawShortcuts.length === 0
+    && bookmark.shortcuts === undefined
+    && Boolean(normalizedSearch);
+
+  const alreadyCanonical = kept.length > 0
+    ? !hasLegacyKeys && shortcutsEqual(bookmark.shortcuts, kept)
+    : bookmark.shortcuts === undefined
+      && bookmark.alias === undefined
+      && (keepOrphanSearch
+        ? bookmark.searchUrl === normalizedSearch
+        : bookmark.searchUrl === undefined);
+
+  if (alreadyCanonical) {
+    return bookmark;
+  }
+
+  const next: Bookmark = { ...bookmark };
+  delete next.alias;
+  delete next.searchUrl;
+  if (kept.length > 0) {
+    next.shortcuts = kept;
+  } else {
+    delete next.shortcuts;
+    if (keepOrphanSearch) {
+      next.searchUrl = normalizedSearch;
+    }
+  }
+  return next;
 }
 
 export function deduplicateBookmarks(
@@ -355,36 +470,12 @@ export function deduplicateBookmarks(
 
     const existingIndex = indexByIdentity.get(identity);
     if (existingIndex === undefined) {
-      let normalizedFirst = item;
-      const rawIcon = item.iconUrl?.trim();
-      const rawAlias = item.alias?.trim();
-      const rawSearch = item.searchUrl?.trim();
+      let normalizedFirst = filterAndCanonicalizeShortcuts(item, usedAliases, usedAliases);
+      const rawIcon = normalizedFirst.iconUrl?.trim();
       const normalizedIcon = rawIcon ? normalizeUrl(rawIcon) : '';
-      const normalizedAlias = rawAlias ? normalizeAlias(rawAlias) : '';
-      const normalizedSearch = rawSearch ? normalizeSearchUrl(rawSearch) : '';
-      const aliasCollides = Boolean(normalizedAlias && usedAliases.has(normalizedAlias));
 
-      if (
-        (rawIcon && normalizedIcon && normalizedIcon !== item.iconUrl)
-        || (rawAlias !== undefined && (aliasCollides || normalizedAlias !== item.alias))
-        || (rawSearch !== undefined && normalizedSearch !== item.searchUrl)
-      ) {
-        normalizedFirst = { ...item };
-        if (rawIcon && normalizedIcon) normalizedFirst.iconUrl = normalizedIcon;
-        if (normalizedAlias && !aliasCollides) {
-          normalizedFirst.alias = normalizedAlias;
-        } else {
-          delete normalizedFirst.alias;
-        }
-        if (normalizedSearch) {
-          normalizedFirst.searchUrl = normalizedSearch;
-        } else if (rawSearch !== undefined) {
-          delete normalizedFirst.searchUrl;
-        }
-      }
-
-      if (normalizedAlias && !aliasCollides) {
-        usedAliases.add(normalizedAlias);
+      if (rawIcon && normalizedIcon && normalizedIcon !== normalizedFirst.iconUrl) {
+        normalizedFirst = { ...normalizedFirst, iconUrl: normalizedIcon };
       }
 
       indexByIdentity.set(identity, result.length);
@@ -439,37 +530,22 @@ function normalizeForReplace(
   sectionMap: Map<string, string>,
 ): Bookmark {
   const section = resolveIncomingSection(bookmark.section, sectionMap);
-  const rawIcon = bookmark.iconUrl?.trim();
+  const canonicalShortcuts = filterAndCanonicalizeShortcuts(bookmark);
+  const rawIcon = canonicalShortcuts.iconUrl?.trim();
   const normalizedIcon = rawIcon ? normalizeUrl(rawIcon) : '';
-  const rawAlias = bookmark.alias?.trim();
-  const normalizedAlias = rawAlias ? normalizeAlias(rawAlias) : '';
-  const rawSearch = bookmark.searchUrl?.trim();
-  const normalizedSearch = rawSearch ? normalizeSearchUrl(rawSearch) : '';
 
   if (
-    section === bookmark.section
-    && (!rawIcon || normalizedIcon === bookmark.iconUrl)
-    && (rawAlias === undefined || normalizedAlias === bookmark.alias)
-    && (rawSearch === undefined || normalizedSearch === bookmark.searchUrl)
+    section === canonicalShortcuts.section
+    && (!rawIcon || normalizedIcon === canonicalShortcuts.iconUrl)
   ) {
-    return bookmark;
+    return canonicalShortcuts;
   }
 
-  const next: Bookmark = { ...bookmark, section };
+  const next: Bookmark = { ...canonicalShortcuts, section };
   if (rawIcon && normalizedIcon) {
     next.iconUrl = normalizedIcon;
   } else if (rawIcon && !normalizedIcon) {
     delete next.iconUrl;
-  }
-  if (normalizedAlias) {
-    next.alias = normalizedAlias;
-  } else {
-    delete next.alias;
-  }
-  if (normalizedSearch) {
-    next.searchUrl = normalizedSearch;
-  } else {
-    delete next.searchUrl;
   }
   return next;
 }
@@ -489,9 +565,8 @@ function computeBookmarkDiffInternal(
     if (id && !existingById.has(id)) {
       existingById.set(id, bookmark);
     }
-    const existingAlias = normalizeAlias(bookmark.alias ?? '');
-    if (existingAlias) {
-      reservedAliases.add(existingAlias);
+    for (const shortcut of getBookmarkShortcuts(bookmark)) {
+      reservedAliases.add(shortcut.alias);
     }
   }
 
@@ -513,19 +588,15 @@ function computeBookmarkDiffInternal(
 
     const ex = existingById.get(id);
     if (!ex) {
-      const incAlias = normalizeAlias(inc.alias ?? '');
-      if (incAlias) {
-        if (reservedAliases.has(incAlias)) {
-          const withoutCollidingAlias: Bookmark = { ...inc };
-          delete withoutCollidingAlias.alias;
-          added.push(withoutCollidingAlias);
-        } else {
-          reservedAliases.add(incAlias);
-          added.push(incAlias === inc.alias ? inc : { ...inc, alias: incAlias });
-        }
-      } else {
-        added.push(inc);
+      const addedBookmark = filterAndCanonicalizeShortcuts(
+        inc,
+        reservedAliases,
+        reservedAliases,
+      );
+      if (addedBookmark !== inc) {
+        replaceTargetByIncoming.set(addedBookmark, normalizedReplaceTarget);
       }
+      added.push(addedBookmark);
       continue;
     }
 
